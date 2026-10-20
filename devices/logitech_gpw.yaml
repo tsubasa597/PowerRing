@@ -1,0 +1,43 @@
+# 罗技 G PRO Wireless（GPW）
+#
+# 这是 PowerRing 的「加设备 = 填表格」示例：新增一台设备只需复制本文件改这几行，
+# 不需要动任何 Rust 代码。字段含义见 PRD §6。
+#
+# 协议常量属事实信息（来源见 protocol_source），本项目未复制 Solaar 等 GPL 项目的源码。
+
+name: "Logitech G PRO Wireless"
+
+# 协议族：目前支持 hid++2.0
+protocol: "hid++2.0"
+# 连接方式：receiver = 经接收器按 slot 寻址；direct = 设备直连
+transport: "receiver"
+
+# 匹配哪个 HID 接口（十六进制字符串）
+match:
+  vendor_id: "0x046D"
+  product_id: "0xC539"   # Lightspeed 接收器的 PID，不是鼠标本身的
+  usage_page: "0xFF00"   # 罗技 vendor collection
+  usage: "0x0002"       # HID++ 2.0 长报文（20 字节）
+
+# 接收器上要探测哪些 slot；省略则默认 1..6
+slots: [1, 2, 3, 4, 5, 6]
+
+battery:
+  # GPW 实测不支持 0x1004 统一电量，只能走电压式（PRD §10 的 R1 已兑现）
+  feature: "0x1001"
+  # voltage = 读到 mV 再查放电曲线；percent = 读到就是百分比
+  kind: "voltage"
+
+# 识别：读设备名并与关键字比对，避免同接收器上的其它设备被误认
+identify:
+  name_feature: "0x0005"
+  contains: "PRO WIRELESS"
+
+protocol_source: "Logitech HID++ 2.0，常量参考 Solaar（GPL-3.0）公开文档"
+verification: "verified"
+
+notes: >
+  接收器暴露 3 个 vendor collection：0x0001(短报文 7B) / 0x0002(长报文 20B) / 0x0004。
+  长报文必须写满 20 字节，否则设备不响应或回错误码 0x8F。
+  探测 slot 是否有设备要用 getFeature，不能用 ping。
+  电压读数有约 1mV 抖动，代码侧做了滞回平滑（变化不足 2% 不更新）。
