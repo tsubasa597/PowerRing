@@ -10,9 +10,14 @@
 //!   · 菜单线程 —— 监听 MenuEvent，只负责把退出标志置起来。
 //! 把 HID 读写挪出主线程，是为了让消息泵不被几百毫秒的设备响应卡住。
 
+// 没有控制台窗口：所有输出走 %APPDATA%\PowerRing\log.txt。
+// 代价是调试时看不到实时输出，换来的是双击运行不再弹黑框。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod config;
 mod device;
 mod hidpp;
+mod log;
 mod popup;
 mod profile;
 
@@ -160,6 +165,9 @@ fn swatch_of(s: &Status) -> (u8, u8, u8) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 日志放在最前面：后面任何一步出问题，都要有地方可查
+    log::init();
+
     // Windows：给进程一个明确的 AppUserModelID，托盘通知才会归属到 PowerRing
     #[cfg(windows)]
     unsafe {
@@ -178,16 +186,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         };
         let ok = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        println!("[dpi] Per-Monitor V2 感知：{:?}", ok);
+        info!("[dpi] Per-Monitor V2 感知：{:?}", ok);
     }
 
     let cfg = Config::load();
-    println!("[config] {:?}", cfg);
+    info!("[config] {:?}", cfg);
 
     let profiles = profile::load();
-    println!("[profile] 已加载 {} 份设备声明", profiles.len());
+    info!("[profile] 已加载 {} 份设备声明", profiles.len());
     for p in &profiles {
-        println!(
+        info!(
             "[profile] {} — {:04X}:{:04X}（{}，来源：{}）",
             p.name, p.vid, p.pid, p.verification, p.protocol_source
         );
@@ -211,15 +219,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let api = match HidApi::new() {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("[hid] 初始化失败：{e}");
+                warn!("[hid] 初始化失败：{e}");
                 return;
             }
         };
         let devices = device::scan(&api, &profiles);
         for d in &devices {
-            println!("[scan] 发现设备：{}", d.name);
+            info!("[scan] 发现设备：{}", d.name);
         }
-        eprintln!("[scan] 首轮匹配到 {} 台设备", devices.len());
+        warn!("[scan] 首轮匹配到 {} 台设备", devices.len());
 
         let mut watched: Vec<Watched> = devices
             .into_iter()
@@ -237,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let fresh = device::scan(&api, &profiles);
                 if !fresh.is_empty() {
                     for d in &fresh {
-                        println!("[scan] 发现设备：{}", d.name);
+                        info!("[scan] 发现设备：{}", d.name);
                     }
                     watched = fresh
                         .into_iter()
@@ -254,13 +262,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match w.dev.read() {
                     Some(b) => {
                         if w.percent.map(|p| p != b.percent).unwrap_or(true) {
-                            println!("[battery] {} → {} mV {}%", w.dev.name, b.mv, b.percent);
+                            info!("[battery] {} → {} mV {}%", w.dev.name, b.mv, b.percent);
                         }
                         w.percent = Some(smooth(w.percent, b.percent));
                         w.charging = b.charging;
                     }
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
-                    None => eprintln!("[battery] {} 读取失败，保留上次读数", w.dev.name),
+                    None => warn!("[battery] {} 读取失败，保留上次读数", w.dev.name),
                 }
             }
             let snap = watched
@@ -285,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => {
                     // 连点几次会攒下多个信号，先排空，免得接下来几轮白转
                     while trig_rx.try_recv().is_ok() {}
-                    println!("[poll] 收到刷新请求，立即读一次");
+                    info!("[poll] 收到刷新请求，立即读一次");
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -324,7 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if ev.id() == &refresh_id {
                 let _ = trigger.send(());
             } else if ev.id() == &quit_id {
-                println!("[tray] 收到退出命令");
+                info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
             }
         }
@@ -344,7 +352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 弹窗窗口必须和消息泵同线程，否则 WM_PAINT 永远到不了
     popup::create()?;
 
-    println!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
+    info!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
 
     // ---- 主线程：消息泵 + 渲染 ----
     let mut latest: Vec<Status> = Vec::new();
@@ -372,7 +380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rect.size.height as i32,
                     ));
                 }
-                println!(
+                info!(
                     "[click] {:?} {:?} rect=({},{}) size=({},{}) 面板当前可见={}",
                     button,
                     button_state,
@@ -394,7 +402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 rect.size.width as i32,
                                 rect.size.height as i32,
                             );
-                            println!("[popup] 显示 {} 台设备", latest.len());
+                            info!("[popup] 显示 {} 台设备", latest.len());
                         }
                     }
                     (MouseButton::Right, MouseButtonState::Down) => popup::hide(),
@@ -415,7 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 一次托盘点击都没发生过（比如刚启动就没人点过图标），退回光标位置
                     None => popup::show_near_cursor(popup_lines(&latest)),
                 }
-                println!("[popup] 菜单打开面板，共 {} 台设备", latest.len());
+                info!("[popup] 菜单打开面板，共 {} 台设备", latest.len());
             }
         }
 
@@ -434,12 +442,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let any_charging = latest.iter().any(|s| s.charging);
 
             if let Err(e) = tray.set_icon(Some(ring_icon(lowest, any_charging))) {
-                eprintln!("[tray] set_icon 失败：{e}");
+                warn!("[tray] set_icon 失败：{e}");
             }
             if let Err(e) = tray.set_tooltip(Some(&tip)) {
-                eprintln!("[tray] set_tooltip 失败：{e}");
+                warn!("[tray] set_tooltip 失败：{e}");
             }
-            println!("[tray] tooltip = {:?}", tip);
+            info!("[tray] tooltip = {:?}", tip);
 
             // 面板开着时，新读数直接刷到面板上（用户点开它就该看到最新值）
             if popup::is_visible() {
@@ -452,7 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 正常退出：让 TrayIcon 走到 drop，托盘图标才不会变成幽灵残影
-    println!("[tray] 正在退出");
+    info!("[tray] 正在退出");
     drop(tray);
     Ok(())
 }

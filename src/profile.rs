@@ -8,6 +8,7 @@
 //!
 //! 原则（对齐 F11.3）：声明文件解析失败时跳过并告警，绝不因此让整个程序崩溃。
 
+use crate::{info, warn};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -167,11 +168,11 @@ pub fn load() -> Vec<Profile> {
     for base in candidate_bases() {
         let d = base.join("devices");
         if d.is_dir() {
-            println!("[profile] 设备声明目录：{:?}", d);
+            info!("[profile] 设备声明目录：{:?}", d);
             return load_from(&d);
         }
     }
-    eprintln!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
+    warn!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
     Vec::new()
 }
 
@@ -208,7 +209,7 @@ fn candidate_bases() -> Vec<PathBuf> {
 fn load_from(dir: &Path) -> Vec<Profile> {
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(dir) else {
-        eprintln!("[profile] 设备声明目录不可用：{:?}", dir);
+        warn!("[profile] 设备声明目录不可用：{:?}", dir);
         return out;
     };
     for e in rd.flatten() {
@@ -220,16 +221,16 @@ fn load_from(dir: &Path) -> Vec<Profile> {
         let text = match fs::read_to_string(&p) {
             Ok(t) => t,
             Err(err) => {
-                eprintln!("[profile] 读取失败，跳过 {:?}：{err}", p);
+                warn!("[profile] 读取失败，跳过 {:?}：{err}", p);
                 continue;
             }
         };
         match serde_yml::from_str::<Raw>(&text) {
             Ok(raw) => match raw.compile() {
                 Ok(prof) => out.push(prof),
-                Err(err) => eprintln!("[profile] 声明有误，跳过 {:?}：{err}", p),
+                Err(err) => warn!("[profile] 声明有误，跳过 {:?}：{err}", p),
             },
-            Err(err) => eprintln!("[profile] YAML 解析失败，跳过 {:?}：{err}", p),
+            Err(err) => warn!("[profile] YAML 解析失败，跳过 {:?}：{err}", p),
         }
     }
     out

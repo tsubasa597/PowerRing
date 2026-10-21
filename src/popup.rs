@@ -10,6 +10,7 @@
 //!     代价是无法用「失焦自动关闭」，所以关闭靠：再点一次托盘、点面板内部、10 秒超时。
 //!   · WS_EX_TOOLWINDOW —— 不在任务栏留按钮，也不出现在 Alt+Tab 里。
 
+use crate::info;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -188,7 +189,7 @@ pub fn show(lines: Vec<Line>, icon_x: i32, icon_y: i32, icon_w: i32, icon_h: i32
     let target = (x, y);
     x = x.clamp(min_x, max_x);
     y = y.clamp(min_y, max_y);
-    println!(
+    info!(
         "[popup] 托盘=({},{}) 尺寸 {}x{} → 想放=({},{}) 实际=({},{}) 桌面=({},{},{},{}）",
         icon_x,
         icon_y,
