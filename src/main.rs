@@ -25,13 +25,15 @@ mod profile;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use hidapi::HidApi;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
 
 use crate::config::Config;
 use crate::popup::Line;
@@ -197,6 +199,22 @@ fn color_of(percent: u8, charging: bool) -> (u8, u8, u8) {
     }
 }
 
+/// 托盘图标此刻的屏幕位置 (x, y, w, h)。
+///
+/// 之前这个位置只从「用户点击托盘」的事件里拿，没人点过就没有 —— 于是提醒卡片
+/// 只能退回光标位置，用户在副屏操作它就弹到副屏去，跟托盘脱节。
+/// 直接问 Shell 要，任何时刻都拿得到。拿不到（图标被折叠进 ^ 里、或托盘还没就绪）
+/// 就返回 None，由调用方决定退路。
+fn icon_rect(tray: &TrayIcon) -> Option<(i32, i32, i32, i32)> {
+    let r = tray.rect()?;
+    Some((
+        r.position.x as i32,
+        r.position.y as i32,
+        r.size.width as i32,
+        r.size.height as i32,
+    ))
+}
+
 fn swatch_of(s: &Status) -> (u8, u8, u8) {
     match s.percent {
         None => (150, 150, 150),     // 未知：灰
@@ -246,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 阈值同理：环色和提醒判断都在运行时读它，改完立刻跟着变
     settings::set_interval(interval);
     settings::set_low(cfg.low_warn, cfg.low_critical);
+    settings::set_notify(cfg.notify_enabled);
 
     // ---- 轮询线程：只管读设备，结果塞进 channel ----
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，
@@ -318,6 +337,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if w.arm_warn == Arm::Spent && percent > warn.saturating_add(3) {
                     w.arm_warn = Arm::Armed;
                 }
+            }
+            // 开关关着时状态机照跑，只是不出声：
+            // 否则关掉期间电量一路跌到底，重新打开开关的瞬间会补弹一张旧的。
+            // 跨档这件事还是记一笔 —— 用户问「怎么不提醒了」时，看日志就知道是开关关着
+            if !settings::notify_enabled() {
+                if let Some(_a) = &out {
+                    info!("[alert] 已跨档但提醒开关关着，不弹：{} {}%", w.dev.name, percent);
+                }
+                return None;
             }
             out
         }
@@ -471,10 +499,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_menu_on_left_click(false)
         .build()?;
 
-    // 托盘图标的屏幕位置只在 TrayIconEvent 里带出来，菜单事件里没有，
-    // 所以右键点过的那一瞬间把它存下来，给菜单里的「显示电量面板」当锚点。
-    let tray_rect: Arc<Mutex<Option<(i32, i32, i32, i32)>>> = Arc::new(Mutex::new(None));
-
     // 弹窗窗口必须和消息泵同线程，否则 WM_PAINT 永远到不了
     popup::create()?;
     settings::create()?;
@@ -502,16 +526,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 button_state,
                 rect,
                 ..
-            } = ev
+            }             = ev
             {
-                if let Ok(mut g) = tray_rect.lock() {
-                    *g = Some((
-                        rect.position.x as i32,
-                        rect.position.y as i32,
-                        rect.size.width as i32,
-                        rect.size.height as i32,
-                    ));
-                }
                 info!(
                     "[click] {:?} {:?} rect=({},{}) size=({},{}) 面板当前可见={}",
                     button,
@@ -549,10 +565,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if popup::is_visible() {
                 popup::hide();
             } else {
-                let anchor = tray_rect.lock().ok().and_then(|g| *g);
-                match anchor {
+                match icon_rect(&tray) {
                     Some((x, y, w, h)) => popup::show(popup_lines(&latest), x, y, w, h),
-                    // 一次托盘点击都没发生过（比如刚启动就没人点过图标），退回光标位置
+                    // 拿不到托盘位置（图标被折叠进 ^ 里了）：菜单是用户主动点的，
+                    // 这会儿光标就在菜单上，跟着光标是对的
                     None => popup::show_near_cursor(popup_lines(&latest)),
                 }
                 info!("[popup] 菜单打开面板，共 {} 台设备", latest.len());
@@ -581,11 +597,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 "电量偏低"
             };
-            let anchor = tray_rect.lock().ok().and_then(|g| *g);
+            // 锚定托盘图标，而不是光标 —— 提醒是程序主动冒出来的，
+            // 用户这会儿多半在副屏上干别的，跟着光标就会弹到副屏去
+            let anchor = icon_rect(&tray);
             info!(
-                "[alert] {} 台设备跌破阈值：{}",
+                "[alert] {} 台设备跌破阈值：{} 锚点={}",
                 alerts.len(),
-                lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join(" / ")
+                lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join(" / "),
+                match anchor {
+                    Some((x, y, _, _)) => format!("托盘 ({},{})", x, y),
+                    None => "主屏右下角".to_string(),
+                }
             );
             popup::alert(lines, title, anchor);
         }

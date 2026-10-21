@@ -10,7 +10,7 @@
 use crate::config::Config;
 use crate::ui::{create_font, font_px as ui_font_px, px};
 use crate::info;
-use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -18,10 +18,16 @@ use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
     GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-    WNDCLASSW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-    WM_CLOSE, WM_COMMAND, WM_SETFONT,
+    WNDCLASSW, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE, WM_CLOSE, WM_COMMAND, WM_SETFONT,
 };
+
+// 复选框的勾选状态。常量本体在 Win32_UI_Controls 里，为两个整数再开一个 feature 不值
+const BM_GETCHECK: u32 = 240;
+const BM_SETCHECK: u32 = 241;
+const BST_CHECKED: usize = 1;
+const BST_UNCHECKED: usize = 0;
 
 // 控件 ID：子窗口 ID 是塞在 CreateWindowExW 的 hMenu 位里的，必须自己编号
 const ID_INTERVAL: isize = 1001;
@@ -30,12 +36,13 @@ const ID_CRITICAL: isize = 1003;
 const ID_SAVE: isize = 1010;
 const ID_CANCEL: isize = 1011;
 const ID_STATUS: isize = 1020;
+const ID_NOTIFY: isize = 1030;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
 // 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 240.0;
+const BASE_H: f32 = 264.0;
 const MARGIN: f32 = 16.0;
 const ROW_TOP: f32 = 20.0;
 const ROW_PITCH: f32 = 36.0;
@@ -43,8 +50,11 @@ const LABEL_W: f32 = 178.0;
 const EDIT_X: f32 = 200.0;
 const EDIT_W: f32 = 124.0;
 const EDIT_H: f32 = 24.0;
-const STATUS_Y: f32 = 140.0;
-const BTN_Y: f32 = 190.0;
+/// 复选框紧跟三行输入框
+const CHECK_Y: f32 = ROW_TOP + ROW_PITCH * 3.0;
+const CHECK_H: f32 = 24.0;
+const STATUS_Y: f32 = 166.0;
+const BTN_Y: f32 = 214.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 30.0;
 const BTN_GAP: f32 = 16.0;
@@ -54,12 +64,15 @@ static HW_INTERVAL: AtomicIsize = AtomicIsize::new(0);
 static HW_WARN: AtomicIsize = AtomicIsize::new(0);
 static HW_CRITICAL: AtomicIsize = AtomicIsize::new(0);
 static HW_STATUS: AtomicIsize = AtomicIsize::new(0);
+static HW_NOTIFY: AtomicIsize = AtomicIsize::new(0);
 /// 当前生效的刷新间隔。轮询线程每轮直接读它，改完设置不用重启程序
 static INTERVAL: AtomicU32 = AtomicU32::new(60);
 /// 当前生效的两档低电量阈值。电量环配色和提醒判断都读它，
 /// 所以改完设置颜色立刻跟着变，不用重启
 static LOW_WARN: AtomicU8 = AtomicU8::new(20);
 static LOW_CRITICAL: AtomicU8 = AtomicU8::new(10);
+/// 低电量提醒开关。关掉只是不弹卡片，阈值仍驱动电量环配色
+static NOTIFY: AtomicBool = AtomicBool::new(true);
 
 fn hwnd() -> HWND {
     HWND(HW.load(Ordering::SeqCst) as *mut core::ffi::c_void)
@@ -87,6 +100,14 @@ pub fn low_critical() -> u8 {
 pub fn set_low(warn: u8, critical: u8) {
     LOW_WARN.store(warn, Ordering::SeqCst);
     LOW_CRITICAL.store(critical, Ordering::SeqCst);
+}
+
+pub fn notify_enabled() -> bool {
+    NOTIFY.load(Ordering::SeqCst)
+}
+
+pub fn set_notify(on: bool) {
+    NOTIFY.store(on, Ordering::SeqCst);
 }
 
 
@@ -248,6 +269,21 @@ pub fn create() -> Result<(), windows::core::Error> {
             }
         }
 
+        // BS_AUTOCHECKBOX：勾选状态由控件自己切换，我们只负责读
+        let notify = make(
+            w!("BUTTON"),
+            "低电量时提醒我",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            px(MARGIN),
+            px(CHECK_Y),
+            px(BASE_W - MARGIN * 2.0),
+            px(CHECK_H),
+            wnd,
+            ID_NOTIFY,
+        );
+        set_font(notify, font);
+        HW_NOTIFY.store(notify.0 as isize, Ordering::SeqCst);
+
         let status = make(
             w!("STATIC"),
             "",
@@ -300,6 +336,7 @@ pub fn open() {
         set_text(ctl(&HW_WARN), &cfg.low_warn.to_string());
         set_text(ctl(&HW_CRITICAL), &cfg.low_critical.to_string());
         set_text(ctl(&HW_STATUS), "");
+        set_check(ctl(&HW_NOTIFY), cfg.notify_enabled);
 
         // 居中于虚拟桌面，双屏时才不会跑到某一块的角落
         let (vx, vy, vw, vh) = crate::ui::virtual_screen();
@@ -344,16 +381,20 @@ fn on_save() {
     }
 
     let mut cfg = Config::load();
+    let notify = is_checked(ctl(&HW_NOTIFY));
+
     cfg.poll_interval_secs = interval;
     cfg.low_warn = warn;
     cfg.low_critical = critical;
+    cfg.notify_enabled = notify;
     cfg.save();
     set_interval(interval);
     set_low(warn, critical);
+    set_notify(notify);
     set_status("已保存，立即生效");
     info!(
-        "[settings] 保存配置：间隔={}s 警告={}% 严重={}%",
-        interval, warn, critical
+        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={}",
+        interval, warn, critical, notify
     );
 }
 
@@ -362,6 +403,24 @@ fn set_status(text: &str) {
     unsafe {
         let _ = SetWindowTextW(ctl(&HW_STATUS), windows::core::PCWSTR(t.as_ptr()));
     }
+}
+
+fn set_check(hw: HWND, on: bool) {
+    unsafe {
+        let _ = SendMessageW(
+            hw,
+            BM_SETCHECK,
+            Some(WPARAM(if on { BST_CHECKED } else { BST_UNCHECKED })),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
+fn is_checked(hw: HWND) -> bool {
+    let r = unsafe {
+        SendMessageW(hw, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0)))
+    };
+    r.0 == BST_CHECKED as isize
 }
 
 fn text_of(hw: HWND) -> String {

@@ -5,10 +5,10 @@
 //! 仍然不引 GUI 框架（ADR-001），这里只有几十行 Win32 调用。
 
 use windows::core::w;
-use windows::Win32::Foundation::COLORREF;
+use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, FF_DONTCARE, HFONT,
-    OUT_DEFAULT_PRECIS,
+    CreateFontW, GetMonitorInfoW, MonitorFromWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, FF_DONTCARE, HFONT, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SYSTEM_METRICS_INDEX};
@@ -73,6 +73,27 @@ pub fn create_font(px: i32) -> HFONT {
 
 pub fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+}
+
+/// 主显示器工作区（不含任务栏）的右下角。
+///
+/// 问「主屏在哪」而不是猜虚拟桌面：虚拟桌面的原点可能在任意一块屏上
+/// （副屏摆在主屏左边时原点坐标是负的），拿它当右下角会算到副屏去。
+/// 传空窗口句柄 + MONITOR_DEFAULTTOPRIMARY 是拿主监视器的标准做法 ——
+/// 传了具体窗口的话，窗口跨屏时会返回它相交最多的那块，不是我们要的。
+pub fn primary_work_bottom_right() -> (i32, i32) {
+    unsafe {
+        let mon = MonitorFromWindow(HWND(std::ptr::null_mut()), MONITOR_DEFAULTTOPRIMARY);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            // 留 8 像素，别让卡片沿边贴死
+            (mi.rcWork.right - 8, mi.rcWork.bottom - 8)
+        } else {
+            let (vx, vy, vw, vh) = virtual_screen();
+            (vx + vw - 8, vy + vh - 8)
+        }
+    }
 }
 
 /// 虚拟桌面的 (x, y, 宽, 高)，用来把窗口夹在可见区域内

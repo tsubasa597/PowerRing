@@ -143,6 +143,10 @@ pub fn show_near_cursor(lines: Vec<Line>) {
 
 /// 低电量提醒卡片。面板已经开着就不弹 —— 那时用户正看着设备列表，
 /// 橙/红色块已经把信息给出来了，再盖一张上去纯属添乱。
+///
+/// anchor 是托盘图标的位置。给不出来时用主屏右下角 —— 刻意**不用光标**：
+/// 提醒是程序主动冒出来的，而用户这会儿多半在副屏上干别的事，
+/// 跟着光标就会弹到副屏去，托盘却在另一块屏上，等于提醒跟主体脱节。
 pub fn alert(lines: Vec<Line>, title: &str, anchor: Option<(i32, i32, i32, i32)>) {
     if VISIBLE[PANEL].load(Ordering::SeqCst) {
         info!("[alert] 面板已开着，跳过提醒");
@@ -151,13 +155,14 @@ pub fn alert(lines: Vec<Line>, title: &str, anchor: Option<(i32, i32, i32, i32)>
     if let Ok(mut g) = TITLES[ALERT].lock() {
         *g = title.to_string();
     }
-    let (x, y, w, h) = anchor.unwrap_or_else(|| {
-        let mut pt = POINT { x: 0, y: 0 };
-        match unsafe { GetCursorPos(&mut pt) } {
-            Ok(()) => (pt.x, pt.y, 0, 0),
-            Err(_) => (0, 0, 0, 0),
+    let (x, y, w, h) = match anchor {
+        Some(r) => r,
+        None => {
+            let (bx, by) = ui::primary_work_bottom_right();
+            info!("[alert] 拿不到托盘位置，回退主屏右下角 ({},{})", bx, by);
+            (bx, by, 0, 0)
         }
-    });
+    };
     place(ALERT, lines, x, y, w, h)
 }
 
@@ -187,23 +192,23 @@ fn place(idx: usize, lines: Vec<Line>, icon_x: i32, icon_y: i32, icon_w: i32, ic
     let target = (x, y);
     x = x.clamp(min_x, max_x);
     y = y.clamp(min_y, max_y);
-    if idx == PANEL {
-        info!(
-            "[popup] 托盘=({},{}) 尺寸 {}x{} → 想放=({},{}) 实际=({},{}) 桌面=({},{},{},{}）",
-            icon_x,
-            icon_y,
-            w,
-            height,
-            target.0,
-            target.1,
-            x,
-            y,
-            vx,
-            vy,
-            vw,
-            vh
-        );
-    }
+    // 位置日志是主要诊断手段 —— AI 看不到屏幕，只能靠数字对
+    info!(
+        "[{}] 锚点=({},{}) 尺寸 {}x{} → 想放=({},{}) 实际=({},{}) 桌面=({},{},{},{})",
+        if idx == PANEL { "popup" } else { "alert" },
+        icon_x,
+        icon_y,
+        w,
+        height,
+        target.0,
+        target.1,
+        x,
+        y,
+        vx,
+        vy,
+        vw,
+        vh
+    );
     unsafe {
         let _ = SetWindowPos(hw, Some(HWND_TOPMOST), x, y, w, height, SWP_NOACTIVATE);
         let _ = ShowWindow(hw, SW_SHOWNA);

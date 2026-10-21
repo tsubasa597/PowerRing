@@ -14,6 +14,8 @@ pub struct Config {
     pub low_warn: u8,
     /// 低电量严重阈值
     pub low_critical: u8,
+    /// 低电量时弹卡片提醒。关掉后阈值仍驱动电量环配色，只是不再主动弹
+    pub notify_enabled: bool,
     pub language: String,
     pub theme: String,
     pub autostart: bool,
@@ -26,6 +28,7 @@ impl Default for Config {
             poll_interval_secs: 60,
             low_warn: 20,
             low_critical: 10,
+            notify_enabled: true,
             language: "zh-CN".into(),
             theme: "system".into(),
             autostart: false,
