@@ -19,6 +19,8 @@ mod device;
 mod hidpp;
 mod log;
 mod popup;
+mod settings;
+mod ui;
 mod profile;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,6 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let interval = cfg.poll_interval_secs.max(5);
+    // 轮询线程每轮读 settings 里那个值，改完设置立刻生效，不用重启
+    settings::set_interval(interval);
 
     // ---- 轮询线程：只管读设备，结果塞进 channel ----
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，
@@ -287,7 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
             let still_pending =
                 watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
-            let wait = if still_pending { 5 } else { interval };
+            let wait = if still_pending { 5 } else { settings::interval() };
             // 睡觉改成带唤醒的等待：有人点「立即刷新」就立刻进入下一轮
             match trig_rx.recv_timeout(Duration::from_secs(wait as u64)) {
                 Ok(()) => {
@@ -309,20 +313,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let menu = Menu::new();
     let open_panel = MenuItem::new("显示电量面板", true, None);
     let refresh = MenuItem::new("立即刷新", true, None);
+    let open_settings = MenuItem::new("设置…", true, None);
     let quit = MenuItem::new("退出 PowerRing", true, None);
     menu.append(&open_panel)?;
     menu.append(&refresh)?;
+    menu.append(&open_settings)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
     let quitting = Arc::new(AtomicBool::new(false));
-    // 菜单线程拿不到 TrayIcon（它不是 Send），只能把意图传回主线程，由主线程真正去弹面板
+    // 菜单线程拿不到 TrayIcon（它不是 Send），只能把意图传回主线程，由主线程真正去做
     let panel_requested = Arc::new(AtomicBool::new(false));
+    let settings_requested = Arc::new(AtomicBool::new(false));
     let panel_id = open_panel.id().clone();
     let refresh_id = refresh.id().clone();
+    let settings_id = open_settings.id().clone();
     let quit_id = quit.id().clone();
     let flag = quitting.clone();
     let req = panel_requested.clone();
+    let sreq = settings_requested.clone();
     let trigger = trig_tx.clone();
     // MenuEvent 只有在消息泵跑起来之后才会产生，所以这里只是「接」，不是「驱动」
     thread::spawn(move || {
@@ -331,6 +340,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 req.store(true, Ordering::SeqCst);
             } else if ev.id() == &refresh_id {
                 let _ = trigger.send(());
+            } else if ev.id() == &settings_id {
+                sreq.store(true, Ordering::SeqCst);
             } else if ev.id() == &quit_id {
                 info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
@@ -351,6 +362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 弹窗窗口必须和消息泵同线程，否则 WM_PAINT 永远到不了
     popup::create()?;
+    settings::create()?;
 
     info!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
 
@@ -425,6 +437,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 info!("[popup] 菜单打开面板，共 {} 台设备", latest.len());
             }
+        }
+
+        // 「设置…」同理：窗口必须和消息泵同线程，打开动作也留在这里
+        if settings_requested.swap(false, Ordering::SeqCst) {
+            settings::open();
         }
 
         popup::tick();

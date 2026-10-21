@@ -49,14 +49,26 @@ impl Config {
             .and_then(|s| serde_json::from_str::<Config>(&s).ok())
             .unwrap_or_default();
 
-        // 回写一次完整配置，用户照着改即可（手改后重启生效，F11.2）
+        // 回写一次完整配置，用户照着手改也能用（缺字段自动补成默认值）
+        cfg.save();
+        cfg
+    }
+
+    /// 写回磁盘。写失败只记日志不报错 —— 配置是为了让程序更好用，
+    /// 不能反过来因为存不下就崩（PRD F11.3）
+    pub fn save(&self) {
+        let p = Self::path();
         if let Some(dir) = p.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        if let Ok(s) = serde_json::to_string_pretty(&cfg) {
-            let _ = fs::write(&p, s);
+        match serde_json::to_string_pretty(self) {
+            Ok(s) => {
+                if let Err(err) = fs::write(&p, s) {
+                    crate::warn!("[config] 保存失败：{}", err);
+                }
+            }
+            Err(err) => crate::warn!("[config] 序列化失败：{}", err),
         }
-        cfg
     }
 }
 

@@ -15,19 +15,17 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::ui::{self, create_font, rgb};
 use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect,
-    SelectObject, SetBkMode, SetTextColor, TextOutW, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, FF_DONTCARE, HFONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SelectObject,
+    SetBkMode, SetTextColor, TextOutW, PAINTSTRUCT, TRANSPARENT,
 };
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, GetSystemMetrics, RegisterClassW,
-    SetWindowPos, ShowWindow, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WM_LBUTTONDOWN, WM_PAINT, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
-    SYSTEM_METRICS_INDEX,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, RegisterClassW, SetWindowPos,
+    ShowWindow, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WM_LBUTTONDOWN,
+    WM_PAINT, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
 };
 
 /// 面板里的一行
@@ -46,36 +44,17 @@ const BASE_TOP: f32 = 30.0;
 /// 没人管它就自己消失，避免一直挂在屏幕上
 const AUTO_HIDE: Duration = Duration::from_secs(10);
 
-// 下面四个 SM_* 是虚拟桌面（所有显示器拼起来的大矩形）的位置与尺寸。
-// 直接写数值而不是引常量：windows crate 里它们散在别处，为四个数再多开依赖不值。
-// 用虚拟桌面而不是主屏，是因为用户是双屏，托盘有可能在副屏上，
-// 按主屏夹取会把它拽回主屏边缘。
-const SM_XVIRTUALSCREEN: i32 = 76;
-const SM_YVIRTUALSCREEN: i32 = 77;
-const SM_CXVIRTUALSCREEN: i32 = 78;
-const SM_CYVIRTUALSCREEN: i32 = 79;
-
-/// 96 DPI = 1.0；4K + 150% 缩放 = 1.5
-fn scale() -> f32 {
-    let dpi = unsafe { GetDpiForSystem() };
-    if dpi <= 0 {
-        1.0
-    } else {
-        dpi as f32 / 96.0
-    }
-}
-
 fn width() -> i32 {
-    (BASE_WIDTH * scale()).round() as i32
+    ui::px(BASE_WIDTH)
 }
 fn row_h() -> i32 {
-    (BASE_ROW_H * scale()).round() as i32
+    ui::px(BASE_ROW_H)
 }
 fn pad() -> i32 {
-    (BASE_PAD * scale()).round() as i32
+    ui::px(BASE_PAD)
 }
 fn top() -> i32 {
-    (BASE_TOP * scale()).round() as i32
+    ui::px(BASE_TOP)
 }
 
 // 全局状态：wndproc 必须是 extern "system" 的自由函数，拿不到闭包上下文，
@@ -89,48 +68,8 @@ fn hwnd() -> HWND {
     HWND(HW.load(Ordering::SeqCst) as *mut core::ffi::c_void)
 }
 
-fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
-    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
-}
-
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
-}
-
-/// 造一个指定像素高度的字体。系统字库在 DPI 感知下不会自动变大，必须自己按 DPI 算；
-/// 高度传负值 = 按字符本身的高度算（不含内部行距），排版更好控。
-fn create_font(px: i32) -> HFONT {
-    let face = w!("Microsoft YaHei UI");
-    unsafe {
-        CreateFontW(
-            -px,
-            0, // 宽度交给系统按字形自适应
-            0,
-            0,
-            400, // FW_NORMAL
-            0,   // 非斜体
-            0,   // 无下划线
-            0,   // 无删除线
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            FF_DONTCARE.0 as u32,
-            face,
-        )
-    }
-}
-
-/// 虚拟桌面（所有显示器拼成的大矩形）的范围，用它来把面板夹在可见区域内
-fn virtual_screen() -> (i32, i32, i32, i32) {
-    unsafe {
-        (
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(SM_XVIRTUALSCREEN)),
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(SM_YVIRTUALSCREEN)),
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(SM_CXVIRTUALSCREEN)),
-            GetSystemMetrics(SYSTEM_METRICS_INDEX(SM_CYVIRTUALSCREEN)),
-        )
-    }
 }
 
 /// 注册窗口类并创建一个初始隐藏的窗口。
@@ -173,7 +112,7 @@ pub fn show(lines: Vec<Line>, icon_x: i32, icon_y: i32, icon_w: i32, icon_h: i32
             .collect::<Vec<_>>();
     }
     let hw = hwnd();
-    let (vx, vy, vw, vh) = virtual_screen();
+    let (vx, vy, vw, vh) = ui::virtual_screen();
     let min_x = vx + 8;
     let min_y = vy + 8;
     // 托盘通常在屏幕右下角，默认往上弹；上方真的放不下才翻到下方
@@ -311,7 +250,7 @@ unsafe fn paint(hwnd: HWND) {
     let _ = SetBkMode(hdc, TRANSPARENT);
     // 声明 DPI 感知后系统不再替我们拉伸，字体得自己按 DPI 放大，
     // 否则 4K + 150% 上文字小得几乎看不清。用 ClearType 保证边缘不发虚。
-    let s = scale();
+    let s = ui::scale();
     let font = create_font((9.0 * s).round() as i32);
     let old = SelectObject(hdc, font.into());
 
