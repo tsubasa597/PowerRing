@@ -50,6 +50,19 @@ struct Alert {
     critical: bool,
 }
 
+/// 某档提醒的弹药状态。
+///
+/// 为什么要区分「已弹过」和「没弹过」：防抖缓冲只能用在**弹过之后**的重新装弹上。
+/// 若一律要求「电量高于阈值+3 才装弹」，电量停在阈值上方 3 点以内时那档就永远不装弹，
+/// 真正跌破时不响 —— 漏报比多弹一次严重得多。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    /// 可以弹
+    Armed,
+    /// 弹过了（或开局就在阈值之下），等回升到阈值 +3 才重新装弹
+    Spent,
+}
+
 /// 手绘电量环图标：32×32 RGBA，零图像处理依赖（这正是「PowerRing」的由来）
 /// percent 为 None 表示「未知」—— 画成全灰环，绝不用 0% 冒充读不到（PRD F2）
 fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
@@ -249,49 +262,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dev: device::Device,
             percent: Option<u8>,
             charging: bool,
-            /// 两档提醒各自的「弹药」。false = 这一档已经提醒过，不要再弹
-            armed_critical: bool,
-            armed_warn: bool,
+            /// 两档提醒各自的弹药
+            arm_critical: Arm,
+            arm_warn: Arm,
         }
 
-        /// 检查这台设备是不是刚跌破阈值。两条规则缺一不可：
-        ///   1. **只在往下跨过时提醒** —— 已经低于阈值还每轮弹，等于每 60 秒烦一次
-        ///   2. **回升 3 个点才重新装弹** —— 电压有 ±1% 抖动（M0.5 实测），
-        ///      不加这条缓冲，电量在 20/21 之间跳时就会反复提醒
-        fn check_alert(w: &mut Watched) -> Option<Alert> {
+        /// 判断这台设备是不是刚跌破阈值，并把弹药状态推进一轮。
+        ///
+        /// 只在**向下跨档**时提醒，且每档只响一次。回升 3 个百分点才重新装弹 ——
+        /// 电压有 ±1% 抖动（M0.5 实测），不留缓冲会在 20/21 之间每 60 秒弹一次。
+        fn check_alert(w: &mut Watched, fresh: bool) -> Option<Alert> {
             let percent = w.percent?;
-            // 插上电就算满血：两档都重新装弹，拔线后放光了还能再提醒一次
-            if w.charging {
-                w.armed_critical = true;
-                w.armed_warn = true;
-                return None;
-            }
             let critical = settings::low_critical();
             let warn = settings::low_warn();
+            // 插上电就算满血：两档都装满，拔线放光后还能再提醒
+            if w.charging {
+                w.arm_critical = Arm::Armed;
+                w.arm_warn = Arm::Armed;
+                return None;
+            }
+            // 刚开机（或刚扫到的设备）：在阈值之上就装弹，在阈值之下算「已弹过」——
+            // 开机时就是 8% 属于既有状态，不是刚跌破，不该一上来就弹
+            if fresh {
+                w.arm_critical = if percent > critical {
+                    Arm::Armed
+                } else {
+                    Arm::Spent
+                };
+                w.arm_warn = if percent > warn { Arm::Armed } else { Arm::Spent };
+            }
+
             let mut out = None;
-            if percent <= critical && w.armed_critical {
-                w.armed_critical = false;
-                // 已经喊过「严重」了，警告那档就别再开口
-                w.armed_warn = false;
+            if percent <= critical && w.arm_critical == Arm::Armed {
+                w.arm_critical = Arm::Spent;
+                // 已经喊过「严重」，警告那档就别再开口
+                w.arm_warn = Arm::Spent;
                 out = Some(Alert {
                     name: w.dev.name.clone(),
                     percent,
                     critical: true,
                 });
-            } else if percent <= warn && w.armed_warn {
-                w.armed_warn = false;
+            } else if percent <= warn && w.arm_warn == Arm::Armed {
+                w.arm_warn = Arm::Spent;
                 out = Some(Alert {
                     name: w.dev.name.clone(),
                     percent,
                     critical: false,
                 });
             }
-            // 重新装弹：高出阈值 3 个点才算真的回升，不是抖动
-            if percent > critical.saturating_add(3) {
-                w.armed_critical = true;
-            }
-            if percent > warn.saturating_add(3) {
-                w.armed_warn = true;
+            if out.is_none() {
+                // 这一轮没弹，才轮到「回升了就重新装弹」
+                if w.arm_critical == Arm::Spent && percent > critical.saturating_add(3) {
+                    w.arm_critical = Arm::Armed;
+                }
+                if w.arm_warn == Arm::Spent && percent > warn.saturating_add(3) {
+                    w.arm_warn = Arm::Armed;
+                }
             }
             out
         }
@@ -314,9 +340,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dev: d,
                 percent: None,
                 charging: false,
-                // 开局不装弹：第一次读到 8% 也不弹 —— 那是开机时的既有状态，不是「刚跌破」
-                armed_critical: false,
-                armed_warn: false,
+                arm_critical: Arm::Armed,
+                arm_warn: Arm::Armed,
             })
             .collect();
 
@@ -335,8 +360,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             dev: d,
                             percent: None,
                             charging: false,
-                            armed_critical: false,
-                            armed_warn: false,
+                            arm_critical: Arm::Armed,
+                            arm_warn: Arm::Armed,
                         })
                         .collect();
                 }
@@ -346,12 +371,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for w in watched.iter_mut() {
                 match w.dev.read() {
                     Some(b) => {
+                        // 是不是这台设备的第一次读数：弹药的初始状态由它决定
+                        let fresh = w.percent.is_none();
                         if w.percent.map(|p| p != b.percent).unwrap_or(true) {
                             info!("[battery] {} → {} mV {}%", w.dev.name, b.mv, b.percent);
                         }
                         w.percent = Some(smooth(w.percent, b.percent));
                         w.charging = b.charging;
-                        if let Some(a) = check_alert(w) {
+                        if let Some(a) = check_alert(w, fresh) {
                             alerts.push(a);
                         }
                     }
