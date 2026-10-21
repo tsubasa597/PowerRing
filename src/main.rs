@@ -580,6 +580,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings::open();
         }
 
+        // 设置窗口里的「试一次」：提醒本来只在跌破阈值时发生，鼠标不会说低就低，
+        // 没有这个入口用户就没法确认卡片长什么样、弹在哪个位置
+        if settings::take_test_request() {
+            // 哪怕是「还没读到设备」也要弹一张：按钮点了却毫无动静，
+            // 用户只会以为它坏了
+            let lines = if latest.is_empty() {
+                vec![Line {
+                    text: "还没有读到任何设备".to_string(),
+                    swatch: (150, 150, 150),
+                }]
+            } else {
+                latest
+                    .iter()
+                    .map(|s| Line {
+                        text: format!(
+                            "{}  {}{}",
+                            s.name,
+                            s.percent.map(|p| format!("{}%", p)).unwrap_or("--".into()),
+                            if s.charging { "  充电中" } else { "" }
+                        ),
+                        swatch: swatch_of(s),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            info!("[alert] 试一次：弹出 {} 台设备", latest.len());
+            popup::alert(lines, "提醒卡片（试一次）", icon_rect(&tray));
+        }
+
         // 低电量提醒：绝大多数轮次收到的是空数组，只有真跨档了才有内容
         while let Ok(alerts) = alert_rx.try_recv() {
             if alerts.is_empty() {

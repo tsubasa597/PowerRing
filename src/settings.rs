@@ -37,6 +37,7 @@ const ID_SAVE: isize = 1010;
 const ID_CANCEL: isize = 1011;
 const ID_STATUS: isize = 1020;
 const ID_NOTIFY: isize = 1030;
+const ID_TEST: isize = 1040;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
@@ -53,6 +54,10 @@ const EDIT_H: f32 = 24.0;
 /// 复选框紧跟三行输入框
 const CHECK_Y: f32 = ROW_TOP + ROW_PITCH * 3.0;
 const CHECK_H: f32 = 24.0;
+/// 复选框给它右边的「试一次」按钮让出位置
+const CHECK_W: f32 = BASE_W - MARGIN * 2.0 - 68.0;
+const TEST_W: f32 = 60.0;
+const TEST_X: f32 = MARGIN + CHECK_W + 8.0;
 const STATUS_Y: f32 = 166.0;
 const BTN_Y: f32 = 214.0;
 const BTN_W: f32 = 84.0;
@@ -73,6 +78,8 @@ static LOW_WARN: AtomicU8 = AtomicU8::new(20);
 static LOW_CRITICAL: AtomicU8 = AtomicU8::new(10);
 /// 低电量提醒开关。关掉只是不弹卡片，阈值仍驱动电量环配色
 static NOTIFY: AtomicBool = AtomicBool::new(true);
+/// 设置窗口里点了「试一次」
+static TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn hwnd() -> HWND {
     HWND(HW.load(Ordering::SeqCst) as *mut core::ffi::c_void)
@@ -108,6 +115,12 @@ pub fn notify_enabled() -> bool {
 
 pub fn set_notify(on: bool) {
     NOTIFY.store(on, Ordering::SeqCst);
+}
+
+/// 主循环每轮问一次：设置窗口里的「试一次」被点过吗。
+/// 取走即清空，连点只会弹一张
+pub fn take_test_request() -> bool {
+    TEST_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
 
@@ -276,13 +289,29 @@ pub fn create() -> Result<(), windows::core::Error> {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
             px(MARGIN),
             px(CHECK_Y),
-            px(BASE_W - MARGIN * 2.0),
+            px(CHECK_W),
             px(CHECK_H),
             wnd,
             ID_NOTIFY,
         );
         set_font(notify, font);
         HW_NOTIFY.store(notify.0 as isize, Ordering::SeqCst);
+
+        // 提醒是「跌破阈值时才发生」的事件，鼠标不会说低就低，
+        // 光靠设置开关用户根本没法验证它长什么样、弹在哪。
+        // 给个手动入口，比让他等鼠标真的放电实在
+        let test = make(
+            w!("BUTTON"),
+            "试一次",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            px(TEST_X),
+            px(CHECK_Y),
+            px(TEST_W),
+            px(CHECK_H),
+            wnd,
+            ID_TEST,
+        );
+        set_font(test, font);
 
         let status = make(
             w!("STATIC"),
@@ -391,7 +420,14 @@ fn on_save() {
     set_interval(interval);
     set_low(warn, critical);
     set_notify(notify);
-    set_status("已保存，立即生效");
+    // 这句提示有实际用处：勾回开关的当下不会补弹一张旧提醒（那次跨档早就过去了），
+    // 不说清楚的话，用户点了保存却发现啥也没弹，只会以为开关没生效
+    let tip = if notify {
+        "已保存；电量再次跌破阈值的那一刻才会提醒"
+    } else {
+        "已保存；提醒已关闭，环色仍按阈值变化"
+    };
+    set_status(tip);
     info!(
         "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={}",
         interval, warn, critical, notify
@@ -496,6 +532,9 @@ unsafe extern "system" fn wndproc(
             match id {
                 ID_SAVE => on_save(),
                 ID_CANCEL => hide(),
+                // 真正的弹卡片动作得留给主线程（窗口和消息泵同线程），
+                // 这里只把「有人点了」这个事实递过去
+                ID_TEST => TEST_REQUESTED.store(true, Ordering::SeqCst),
                 _ => {}
             }
             LRESULT(0)
