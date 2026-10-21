@@ -18,9 +18,9 @@ use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
     GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-    WNDCLASSW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_STYLE,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WM_CLOSE, WM_COMMAND, WM_SETFONT,
+    WNDCLASSW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_CLOSE, WM_COMMAND, WM_SETFONT,
 };
 
 // 控件 ID：子窗口 ID 是塞在 CreateWindowExW 的 hMenu 位里的，必须自己编号
@@ -72,10 +72,17 @@ pub fn set_interval(v: u32) {
     INTERVAL.store(v, Ordering::SeqCst);
 }
 
+
+/// 普通窗口样式，**不带 WS_EX_TOOLWINDOW**。
+///
+/// 工具窗口样式是给浮动工具栏/调色板用的：它的标题栏是矮的，
+/// 但系统给它预留的非客户区仍是标准标题栏的高度（144 DPI 下 45px），
+/// 矮标题栏摆在 45px 里，右上角 X 的上方就空出一条。
+/// 设置窗口是有标题的对话框，用标准样式才对 —— 代价是任务栏会多一个按钮，
+/// 换来的是窗口被别的窗口盖住时还能在任务栏找回来。
 fn window_style() -> WINDOW_STYLE {
     WS_POPUP | WS_CAPTION | WS_SYSMENU
 }
-
 /// 客户区尺寸 → 窗口外框尺寸。中间差的是标题栏和边框，
 /// 这一步交给 AdjustWindowRectEx 算，别自己加常数：
 /// 标题栏高度随 DPI 变，硬编码的常数换了台显示器就错。
@@ -87,7 +94,7 @@ fn outer_size() -> (i32, i32) {
         bottom: px(BASE_H),
     };
     unsafe {
-        if AdjustWindowRectEx(&mut r, window_style(), false, WS_EX_TOOLWINDOW).is_err() {
+        if AdjustWindowRectEx(&mut r, window_style(), false, WINDOW_EX_STYLE(0)).is_err() {
             // 算不出来就退回加点余量，总比把按钮切掉强
             return (px(BASE_W) + 8, px(BASE_H) + 40);
         }
@@ -161,7 +168,7 @@ pub fn create() -> Result<(), windows::core::Error> {
 
         let (ow, oh) = outer_size();
         let wnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WINDOW_EX_STYLE(0), // 不用 WS_EX_TOOLWINDOW：矮标题栏会留空档，见 window_style 注释
             w!("PowerRingSettings"),
             w!("PowerRing 设置"),
             window_style(),
