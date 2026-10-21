@@ -10,7 +10,7 @@
 use crate::config::Config;
 use crate::ui::{create_font, font_px as ui_font_px, px};
 use crate::info;
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU8, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -56,6 +56,10 @@ static HW_CRITICAL: AtomicIsize = AtomicIsize::new(0);
 static HW_STATUS: AtomicIsize = AtomicIsize::new(0);
 /// 当前生效的刷新间隔。轮询线程每轮直接读它，改完设置不用重启程序
 static INTERVAL: AtomicU32 = AtomicU32::new(60);
+/// 当前生效的两档低电量阈值。电量环配色和提醒判断都读它，
+/// 所以改完设置颜色立刻跟着变，不用重启
+static LOW_WARN: AtomicU8 = AtomicU8::new(20);
+static LOW_CRITICAL: AtomicU8 = AtomicU8::new(10);
 
 fn hwnd() -> HWND {
     HWND(HW.load(Ordering::SeqCst) as *mut core::ffi::c_void)
@@ -70,6 +74,19 @@ pub fn interval() -> u32 {
 
 pub fn set_interval(v: u32) {
     INTERVAL.store(v, Ordering::SeqCst);
+}
+
+pub fn low_warn() -> u8 {
+    LOW_WARN.load(Ordering::SeqCst)
+}
+
+pub fn low_critical() -> u8 {
+    LOW_CRITICAL.load(Ordering::SeqCst)
+}
+
+pub fn set_low(warn: u8, critical: u8) {
+    LOW_WARN.store(warn, Ordering::SeqCst);
+    LOW_CRITICAL.store(critical, Ordering::SeqCst);
 }
 
 
@@ -332,6 +349,7 @@ fn on_save() {
     cfg.low_critical = critical;
     cfg.save();
     set_interval(interval);
+    set_low(warn, critical);
     set_status("已保存，立即生效");
     info!(
         "[settings] 保存配置：间隔={}s 警告={}% 严重={}%",

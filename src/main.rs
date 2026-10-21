@@ -43,6 +43,13 @@ struct Status {
     charging: bool,
 }
 
+/// 一次低电量提醒。是「事件」不是「状态」—— 一轮轮询最多产生一次
+struct Alert {
+    name: String,
+    percent: u8,
+    critical: bool,
+}
+
 /// 手绘电量环图标：32×32 RGBA，零图像处理依赖（这正是「PowerRing」的由来）
 /// percent 为 None 表示「未知」—— 画成全灰环，绝不用 0% 冒充读不到（PRD F2）
 fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
@@ -68,17 +75,7 @@ fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
             }
             let (r, g, b) = match percent {
                 None => (110, 110, 110), // 未知：整环灰
-                Some(p) if ang <= filled_deg => {
-                    if charging {
-                        (52, 152, 219) // 充电中：蓝
-                    } else if p <= 10 {
-                        (192, 57, 43) // 严重：红
-                    } else if p <= 20 {
-                        (230, 126, 34) // 警告：橙
-                    } else {
-                        (39, 174, 96) // 正常：绿
-                    }
-                }
+                Some(p) if ang <= filled_deg => color_of(p, charging),
                 Some(_) => (75, 75, 75), // 未填充部分：深灰
             };
             let i = (y * S + x) * 4;
@@ -155,14 +152,42 @@ fn popup_lines(list: &[Status]) -> Vec<Line> {
         .collect()
 }
 
-/// 电量档位 → 颜色。与 ring_icon 内的配色保持一致，改动时两处一起改。
+/// 电量档位 → 颜色。电量环和弹窗色块共用这一处，改配色只改这里。
+///
+/// 阈值读的是设置窗口里当前的值（settings::low_*），不写死 10/20 ——
+/// 否则用户把阈值改成 30，环色还是按 20 变橙，设置等于白改。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Critical = 0,
+    Warn = 1,
+    Normal = 2,
+    Charging = 3,
+    Unknown = 4,
+}
+
+fn tier_of(percent: Option<u8>, charging: bool) -> Tier {
+    match (percent, charging) {
+        (None, _) => Tier::Unknown,
+        (Some(_), true) => Tier::Charging,
+        (Some(p), false) if p <= settings::low_critical() => Tier::Critical,
+        (Some(p), false) if p <= settings::low_warn() => Tier::Warn,
+        _ => Tier::Normal,
+    }
+}
+
+fn color_of(percent: u8, charging: bool) -> (u8, u8, u8) {
+    match tier_of(Some(percent), charging) {
+        Tier::Charging => (52, 152, 219),  // 充电中：蓝
+        Tier::Critical => (192, 57, 43),   // 严重：红
+        Tier::Warn => (230, 126, 34),      // 警告：橙
+        _ => (39, 174, 96),                // 正常：绿
+    }
+}
+
 fn swatch_of(s: &Status) -> (u8, u8, u8) {
     match s.percent {
         None => (150, 150, 150),     // 未知：灰
-        Some(_) if s.charging => (52, 152, 219), // 充电中：蓝
-        Some(p) if p <= 10 => (192, 57, 43),     // 严重：红
-        Some(p) if p <= 20 => (230, 126, 34),    // 警告：橙
-        Some(_) => (39, 174, 96),                // 正常：绿
+        Some(p) => color_of(p, s.charging),
     }
 }
 
@@ -204,13 +229,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let interval = cfg.poll_interval_secs.max(5);
-    // 轮询线程每轮读 settings 里那个值，改完设置立刻生效，不用重启
+    // 轮询线程每轮读 settings 里那个值，改完设置立刻生效，不用重启。
+    // 阈值同理：环色和提醒判断都在运行时读它，改完立刻跟着变
     settings::set_interval(interval);
+    settings::set_low(cfg.low_warn, cfg.low_critical);
 
     // ---- 轮询线程：只管读设备，结果塞进 channel ----
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，
     // 主线程从头到尾不碰 HID，只负责 UI 与消息泵。
     let (tx, rx) = mpsc::channel::<Vec<Status>>();
+    // 低电量提醒走单独的通道：提醒是「事件」，不是「状态」，
+    // 混进每轮都发的快照里，主线程无从判断该不该弹
+    let (alert_tx, alert_rx) = mpsc::channel::<Vec<Alert>>();
     // 「立即刷新」用的唤醒通道：轮询线程平时睡在 recv_timeout 上，收到信号就提前醒。
     // 没有它，「刷新」菜单项就得干等下一轮轮询（60 秒），点了跟没点一样。
     let (trig_tx, trig_rx) = mpsc::channel::<()>();
@@ -219,6 +249,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dev: device::Device,
             percent: Option<u8>,
             charging: bool,
+            /// 两档提醒各自的「弹药」。false = 这一档已经提醒过，不要再弹
+            armed_critical: bool,
+            armed_warn: bool,
+        }
+
+        /// 检查这台设备是不是刚跌破阈值。两条规则缺一不可：
+        ///   1. **只在往下跨过时提醒** —— 已经低于阈值还每轮弹，等于每 60 秒烦一次
+        ///   2. **回升 3 个点才重新装弹** —— 电压有 ±1% 抖动（M0.5 实测），
+        ///      不加这条缓冲，电量在 20/21 之间跳时就会反复提醒
+        fn check_alert(w: &mut Watched) -> Option<Alert> {
+            let percent = w.percent?;
+            // 插上电就算满血：两档都重新装弹，拔线后放光了还能再提醒一次
+            if w.charging {
+                w.armed_critical = true;
+                w.armed_warn = true;
+                return None;
+            }
+            let critical = settings::low_critical();
+            let warn = settings::low_warn();
+            let mut out = None;
+            if percent <= critical && w.armed_critical {
+                w.armed_critical = false;
+                // 已经喊过「严重」了，警告那档就别再开口
+                w.armed_warn = false;
+                out = Some(Alert {
+                    name: w.dev.name.clone(),
+                    percent,
+                    critical: true,
+                });
+            } else if percent <= warn && w.armed_warn {
+                w.armed_warn = false;
+                out = Some(Alert {
+                    name: w.dev.name.clone(),
+                    percent,
+                    critical: false,
+                });
+            }
+            // 重新装弹：高出阈值 3 个点才算真的回升，不是抖动
+            if percent > critical.saturating_add(3) {
+                w.armed_critical = true;
+            }
+            if percent > warn.saturating_add(3) {
+                w.armed_warn = true;
+            }
+            out
         }
         let api = match HidApi::new() {
             Ok(a) => a,
@@ -239,6 +314,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dev: d,
                 percent: None,
                 charging: false,
+                // 开局不装弹：第一次读到 8% 也不弹 —— 那是开机时的既有状态，不是「刚跌破」
+                armed_critical: false,
+                armed_warn: false,
             })
             .collect();
 
@@ -257,11 +335,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             dev: d,
                             percent: None,
                             charging: false,
+                            armed_critical: false,
+                            armed_warn: false,
                         })
                         .collect();
                 }
             }
 
+            let mut alerts: Vec<Alert> = Vec::new();
             for w in watched.iter_mut() {
                 match w.dev.read() {
                     Some(b) => {
@@ -270,6 +351,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         w.percent = Some(smooth(w.percent, b.percent));
                         w.charging = b.charging;
+                        if let Some(a) = check_alert(w) {
+                            alerts.push(a);
+                        }
                     }
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
                     None => warn!("[battery] {} 读取失败，保留上次读数", w.dev.name),
@@ -285,6 +369,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>();
             if tx.send(snap).is_err() {
                 break; // 主线程已退出
+            }
+            // 通常是空数组，只有真跨档了才有内容
+            if alert_tx.send(alerts).is_err() {
+                break;
             }
             // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
@@ -447,6 +535,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 「设置…」同理：窗口必须和消息泵同线程，打开动作也留在这里
         if settings_requested.swap(false, Ordering::SeqCst) {
             settings::open();
+        }
+
+        // 低电量提醒：绝大多数轮次收到的是空数组，只有真跨档了才有内容
+        while let Ok(alerts) = alert_rx.try_recv() {
+            if alerts.is_empty() {
+                continue;
+            }
+            let lines = alerts
+                .iter()
+                .map(|a| Line {
+                    text: format!("{}  {}%{}", a.name, a.percent, if a.critical { "  该充电了" } else { "" }),
+                    swatch: color_of(a.percent, false),
+                })
+                .collect::<Vec<_>>();
+            let title = if alerts.iter().any(|a| a.critical) {
+                "电量严重不足"
+            } else {
+                "电量偏低"
+            };
+            let anchor = tray_rect.lock().ok().and_then(|g| *g);
+            info!(
+                "[alert] {} 台设备跌破阈值：{}",
+                alerts.len(),
+                lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join(" / ")
+            );
+            popup::alert(lines, title, anchor);
         }
 
         popup::tick();
