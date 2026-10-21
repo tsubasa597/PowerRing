@@ -8,18 +8,19 @@
 //! 现在的菜单里也就不给它留位置，免得摆一个点了没反应的开关。
 
 use crate::config::Config;
-use crate::ui::{create_font, px};
+use crate::ui::{create_font, font_px as ui_font_px, px};
 use crate::info;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos,
-    SetWindowTextW, ShowWindow, WNDCLASSW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP,
-    SW_HIDE, SW_SHOW, WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WM_CLOSE, WM_COMMAND, WM_SETFONT,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
+    GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
+    WNDCLASSW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_STYLE,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE, WM_CLOSE, WM_COMMAND, WM_SETFONT,
 };
 
 // 控件 ID：子窗口 ID 是塞在 CreateWindowExW 的 hMenu 位里的，必须自己编号
@@ -30,9 +31,23 @@ const ID_SAVE: isize = 1010;
 const ID_CANCEL: isize = 1011;
 const ID_STATUS: isize = 1020;
 
-// 96 DPI 下的布局，实际按 DPI 放大
+// 96 DPI 下的**客户区**布局，实际按 DPI 放大。
+// 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
+// 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 225.0;
+const BASE_H: f32 = 240.0;
+const MARGIN: f32 = 16.0;
+const ROW_TOP: f32 = 20.0;
+const ROW_PITCH: f32 = 36.0;
+const LABEL_W: f32 = 178.0;
+const EDIT_X: f32 = 200.0;
+const EDIT_W: f32 = 124.0;
+const EDIT_H: f32 = 24.0;
+const STATUS_Y: f32 = 140.0;
+const BTN_Y: f32 = 190.0;
+const BTN_W: f32 = 84.0;
+const BTN_H: f32 = 30.0;
+const BTN_GAP: f32 = 16.0;
 
 static HW: AtomicIsize = AtomicIsize::new(0);
 static HW_INTERVAL: AtomicIsize = AtomicIsize::new(0);
@@ -57,6 +72,74 @@ pub fn set_interval(v: u32) {
     INTERVAL.store(v, Ordering::SeqCst);
 }
 
+fn window_style() -> WINDOW_STYLE {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU
+}
+
+/// 客户区尺寸 → 窗口外框尺寸。中间差的是标题栏和边框，
+/// 这一步交给 AdjustWindowRectEx 算，别自己加常数：
+/// 标题栏高度随 DPI 变，硬编码的常数换了台显示器就错。
+fn outer_size() -> (i32, i32) {
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: px(BASE_W),
+        bottom: px(BASE_H),
+    };
+    unsafe {
+        if AdjustWindowRectEx(&mut r, window_style(), false, WS_EX_TOOLWINDOW).is_err() {
+            // 算不出来就退回加点余量，总比把按钮切掉强
+            return (px(BASE_W) + 8, px(BASE_H) + 40);
+        }
+    }
+    (r.right - r.left, r.bottom - r.top)
+}
+
+
+/// 把客户区撑到设计尺寸。
+///
+/// AdjustWindowRectEx 用的是**系统 DPI** 下的非客户区尺寸，而我们的窗口是
+/// Per-Monitor 感知的：它一旦落在 4K + 150% 那块屏上，标题栏会比系统 DPI 算出来的
+/// 高出一截，客户区就被啃掉 —— 表现就是底部的按钮被切掉一截。
+/// 这里不猜，直接实测客户区，差多少补多少。
+fn fit_client() {
+    unsafe {
+        let mut c = RECT::default();
+        if GetClientRect(hwnd(), &mut c).is_err() {
+            return;
+        }
+        let need_w = px(BASE_W);
+        let need_h = px(BASE_H);
+        let dw = (need_w - (c.right - c.left)).max(0);
+        let dh = (need_h - (c.bottom - c.top)).max(0);
+        info!(
+            "[settings] 客户区实测 {}x{}，需要 {}x{}，补 {}x{}",
+            c.right - c.left,
+            c.bottom - c.top,
+            need_w,
+            need_h,
+            dw,
+            dh
+        );
+        if dw == 0 && dh == 0 {
+            return;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd(), &mut r).is_err() {
+            return;
+        }
+        let _ = SetWindowPos(
+            hwnd(),
+            Some(HWND_TOP),
+            r.left,
+            r.top,
+            (r.right - r.left) + dw,
+            (r.bottom - r.top) + dh,
+            Default::default(),
+        );
+    }
+}
+
 /// 转成 UTF-16 并补 NUL：Win32 的字符串参数都以 NUL 结尾，不补会读到后面的内存
 fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -76,15 +159,16 @@ pub fn create() -> Result<(), windows::core::Error> {
     unsafe {
         RegisterClassW(&class);
 
+        let (ow, oh) = outer_size();
         let wnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             w!("PowerRingSettings"),
             w!("PowerRing 设置"),
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            window_style(),
             0,
             0,
-            px(BASE_W),
-            px(BASE_H),
+            ow,
+            oh,
             None,
             None,
             None,
@@ -92,21 +176,30 @@ pub fn create() -> Result<(), windows::core::Error> {
         )?;
         HW.store(wnd.0 as isize, Ordering::SeqCst);
 
-        let font = create_font(px(9.0));
+        // 9 磅 = Windows 标准界面字号
+        let font = create_font(ui_font_px(9.0));
+        // 字号和缩放写进日志：换台显示器说「字太小」时，看这一行就能知道算成了多少
+        info!(
+            "[settings] 缩放 {:.2}x，9 磅 = {}px，客户区 {}x{}",
+            crate::ui::scale(),
+            ui_font_px(9.0),
+            px(BASE_W),
+            px(BASE_H)
+        );
         let rows = [
             (ID_INTERVAL, "刷新间隔（秒）"),
             (ID_WARN, "低电量警告阈值（%）"),
             (ID_CRITICAL, "低电量严重阈值（%）"),
         ];
         for (i, (id, label)) in rows.iter().enumerate() {
-            let y = px(20.0) + i as i32 * px(36.0);
+            let y = px(ROW_TOP) + i as i32 * px(ROW_PITCH);
             let lb = make(
                 w!("STATIC"),
                 label,
                 WS_CHILD | WS_VISIBLE,
-                px(16.0),
+                px(MARGIN),
                 y + px(4.0),
-                px(178.0),
+                px(LABEL_W),
                 px(20.0),
                 wnd,
                 0,
@@ -115,10 +208,10 @@ pub fn create() -> Result<(), windows::core::Error> {
                 w!("EDIT"),
                 "",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                px(200.0),
+                px(EDIT_X),
                 y,
-                px(124.0),
-                px(24.0),
+                px(EDIT_W),
+                px(EDIT_H),
                 wnd,
                 *id,
             );
@@ -135,9 +228,9 @@ pub fn create() -> Result<(), windows::core::Error> {
             w!("STATIC"),
             "",
             WS_CHILD | WS_VISIBLE,
-            px(16.0),
-            px(136.0),
-            px(308.0),
+            px(MARGIN),
+            px(STATUS_Y),
+            px(BASE_W - MARGIN * 2.0),
             px(20.0),
             wnd,
             ID_STATUS,
@@ -145,14 +238,16 @@ pub fn create() -> Result<(), windows::core::Error> {
         set_font(status, font);
         HW_STATUS.store(status.0 as isize, Ordering::SeqCst);
 
+        // 两个按钮右对齐到边距，取消在右
+        let bx = px(BASE_W - MARGIN - BTN_W - BTN_GAP - BTN_W);
         let save = make(
             w!("BUTTON"),
             "保存",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
-            px(136.0),
-            px(166.0),
-            px(84.0),
-            px(30.0),
+            bx,
+            px(BTN_Y),
+            px(BTN_W),
+            px(BTN_H),
             wnd,
             ID_SAVE,
         );
@@ -160,10 +255,10 @@ pub fn create() -> Result<(), windows::core::Error> {
             w!("BUTTON"),
             "取消",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
-            px(232.0),
-            px(166.0),
-            px(84.0),
-            px(30.0),
+            bx + px(BTN_W + BTN_GAP),
+            px(BTN_Y),
+            px(BTN_W),
+            px(BTN_H),
             wnd,
             ID_CANCEL,
         );
@@ -184,13 +279,14 @@ pub fn open() {
 
         // 居中于虚拟桌面，双屏时才不会跑到某一块的角落
         let (vx, vy, vw, vh) = crate::ui::virtual_screen();
-        let w = px(BASE_W);
-        let h = px(BASE_H);
+        let (w, h) = outer_size();
         let x = vx + (vw - w) / 2;
         let y = vy + (vh - h) / 2;
         let _ = SetWindowPos(hwnd(), Some(HWND_TOP), x, y, w, h, Default::default());
         let _ = ShowWindow(hwnd(), SW_SHOW);
-        info!("[settings] 打开设置窗口，位置=({},{})", x, y);
+        // 先显示再校准：客户区只有窗口真实存在后才量得准
+        fit_client();
+        info!("[settings] 打开设置窗口，位置=({},{}) 外框={}x{}", x, y, w, h);
     }
 }
 

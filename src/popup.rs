@@ -248,34 +248,37 @@ unsafe fn paint(hwnd: HWND) {
     let _ = DeleteObject(bg.into());
 
     let _ = SetBkMode(hdc, TRANSPARENT);
-    // 声明 DPI 感知后系统不再替我们拉伸，字体得自己按 DPI 放大，
-    // 否则 4K + 150% 上文字小得几乎看不清。用 ClearType 保证边缘不发虚。
-    let s = ui::scale();
-    let font = create_font((9.0 * s).round() as i32);
+    // 9 磅是 Windows 界面字号（96 DPI 下 12px）。按 DPI 换算成物理像素，
+    // 4K + 150% 上就是 18px —— 和别的应用里的正文一样大。
+    let font = create_font(ui::font_px(9.0));
     let old = SelectObject(hdc, font.into());
+
+    // 行内垂直居中：行高 28（96 DPI 设计值），字高 12 → 上下各留 8
+    let inset = ui::px(8.0);
 
     // 标题
     let _ = SetTextColor(hdc, rgb(70, 70, 70));
     let title = wide("PowerRing — 设备电量");
-    let _ = TextOutW(hdc, pad(), (8.0 * s).round() as i32, &title);
+    let _ = TextOutW(hdc, pad(), inset, &title);
 
     if let Ok(lines) = LINES.lock() {
         for (i, (text, (r, g, b))) in lines.iter().enumerate() {
             let y = top() + i as i32 * row_h();
-            // 左侧色块：一眼看出档位，比读数字快
+            // 左侧色块：一眼看出档位，比读数字快。
+            // 高度取一行的一半，跟着字体一起缩放，和文字视觉上等重
             let sw = CreateSolidBrush(rgb(*r, *g, *b));
             let srect = RECT {
                 left: pad(),
-                top: y + (8.0 * s).round() as i32,
-                right: pad() + (10.0 * s).round() as i32,
-                bottom: y + (18.0 * s).round() as i32,
+                top: y + inset,
+                right: pad() + ui::px(10.0),
+                bottom: y + row_h() - inset,
             };
             let _ = FillRect(hdc, &srect, sw);
             let _ = DeleteObject(sw.into());
 
             let _ = SetTextColor(hdc, rgb(40, 40, 40));
             let w = wide(text);
-            let _ = TextOutW(hdc, pad() + (20.0 * s).round() as i32, y + (5.0 * s).round() as i32, &w);
+            let _ = TextOutW(hdc, pad() + ui::px(20.0), y + inset, &w);
         }
     }
 

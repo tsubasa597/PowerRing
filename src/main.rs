@@ -363,6 +363,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 弹窗窗口必须和消息泵同线程，否则 WM_PAINT 永远到不了
     popup::create()?;
     settings::create()?;
+    // 开发用开关：设了环境变量就一开机直接弹设置窗口，
+    // 这样改界面尺寸能在日志里量出真实客户区，不必每次都麻烦用户手动点开
+    if std::env::var("POWERRING_OPEN_SETTINGS").is_ok() {
+        settings::open();
+    }
 
     info!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
 
