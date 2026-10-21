@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Windows 无线外设电量监测工具（托盘电量环）"
 license = "MIT"
-repository = "https://github.com/PowerRing/PowerRing"
+repository = "https://github.com/vkeyzhen/PowerRing"
 
 [[bin]]
 name = "powerring"
@@ -22,7 +22,9 @@ version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先

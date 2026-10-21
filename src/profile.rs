@@ -10,7 +10,7 @@
 
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::hidpp::BatteryKind;
 
@@ -155,9 +155,54 @@ impl Raw {
     }
 }
 
-/// 加载 devices 目录下全部声明。解析失败的会打印原因并跳过。
-pub fn load(dir: &str) -> Vec<Profile> {
-    load_from(Path::new(dir))
+/// 按 exe 位置找到 devices 目录并加载全部声明。解析失败的会打印原因并跳过。
+///
+/// 为什么不能直接用相对路径「devices」：它依赖的是**当前工作目录**，
+/// 而开发态和发布态的布局完全不同 ——
+///   · cargo 运行时：工作目录是项目根，exe 在 target/release 下
+///   · 双击 exe 时：工作目录是任意位置（资源管理器里是 target/release）
+/// 只认一边，另一边必然失效，表现是「托盘起来了但一台设备都扫不到」。
+/// 所以按 exe 所在目录往上找，找不着再退回工作目录。
+pub fn load() -> Vec<Profile> {
+    for base in candidate_bases() {
+        let d = base.join("devices");
+        if d.is_dir() {
+            println!("[profile] 设备声明目录：{:?}", d);
+            return load_from(&d);
+        }
+    }
+    eprintln!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
+    Vec::new()
+}
+
+/// 从 exe 所在目录开始，逐级向上找 devices；最后是工作目录与 %APPDATA%
+fn candidate_bases() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // 发布布局：exe 与 devices 平级（PowerRing/devices + PowerRing/powerring.exe）
+            let mut cur = dir.to_path_buf();
+            out.push(cur.clone());
+            // 开发布局：exe 在 target/release 里，devices 在项目根，所以往上探几级
+            for _ in 0..3 {
+                match cur.parent() {
+                    Some(p) => {
+                        cur = p.to_path_buf();
+                        out.push(cur.clone());
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd);
+    }
+    // 以后装到系统里，声明会放在 %APPDATA%\PowerRing\devices
+    if let Ok(app) = std::env::var("APPDATA") {
+        out.push(PathBuf::from(app).join("PowerRing"));
+    }
+    out
 }
 
 fn load_from(dir: &Path) -> Vec<Profile> {

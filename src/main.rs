@@ -13,19 +13,21 @@
 mod config;
 mod device;
 mod hidpp;
+mod popup;
 mod profile;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use hidapi::HidApi;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Config;
+use crate::popup::Line;
 
 /// 轮询线程交给主线程的一次快照
 struct Status {
@@ -121,6 +123,42 @@ fn tooltip_of(list: &[Status]) -> String {
         .join(" / ")
 }
 
+/// 弹窗里的行。色块颜色与托盘电量环共用同一套语义，
+/// 用户看环和看面板得到的是同一个信号，不需要重新学一遍。
+fn popup_lines(list: &[Status]) -> Vec<Line> {
+    if list.is_empty() {
+        return vec![Line {
+            text: "未检测到设备".to_string(),
+            swatch: (150, 150, 150),
+        }];
+    }
+    list.iter()
+        .map(|s| Line {
+            text: match s.percent {
+                Some(p) => format!(
+                    "{}  {}%{}",
+                    s.name,
+                    p,
+                    if s.charging { "  充电中" } else { "" }
+                ),
+                None => format!("{}  --", s.name),
+            },
+            swatch: swatch_of(s),
+        })
+        .collect()
+}
+
+/// 电量档位 → 颜色。与 ring_icon 内的配色保持一致，改动时两处一起改。
+fn swatch_of(s: &Status) -> (u8, u8, u8) {
+    match s.percent {
+        None => (150, 150, 150),     // 未知：灰
+        Some(_) if s.charging => (52, 152, 219), // 充电中：蓝
+        Some(p) if p <= 10 => (192, 57, 43),     // 严重：红
+        Some(p) if p <= 20 => (230, 126, 34),    // 警告：橙
+        Some(_) => (39, 174, 96),                // 正常：绿
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Windows：给进程一个明确的 AppUserModelID，托盘通知才会归属到 PowerRing
     #[cfg(windows)]
@@ -129,10 +167,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = SetCurrentProcessExplicitAppUserModelID(windows::core::w!("PowerRing.PowerRing"));
     }
 
+    // 声明 Per-Monitor DPI 感知：不做这一步，Windows 会把我们的窗口坐标按
+    // 96 DPI 虚拟化，而托盘位置（Shell_NotifyIconGetRect）给的是物理像素 ——
+    // 两套坐标一混，4K + 150% 缩放的机器上弹窗就飘到屏幕边上去了。
+    // 副作用是系统不再帮我们拉伸界面，文字也会更清晰（代价是要自己按 DPI 放大字号）。
+    // 必须放在创建任何窗口之前，晚了就不生效。
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let ok = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        println!("[dpi] Per-Monitor V2 感知：{:?}", ok);
+    }
+
     let cfg = Config::load();
     println!("[config] {:?}", cfg);
 
-    let profiles = profile::load("devices");
+    let profiles = profile::load();
     println!("[profile] 已加载 {} 份设备声明", profiles.len());
     for p in &profiles {
         println!(
@@ -147,6 +199,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，
     // 主线程从头到尾不碰 HID，只负责 UI 与消息泵。
     let (tx, rx) = mpsc::channel::<Vec<Status>>();
+    // 「立即刷新」用的唤醒通道：轮询线程平时睡在 recv_timeout 上，收到信号就提前醒。
+    // 没有它，「刷新」菜单项就得干等下一轮轮询（60 秒），点了跟没点一样。
+    let (trig_tx, trig_rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         struct Watched {
             dev: device::Device,
@@ -219,22 +274,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if tx.send(snap).is_err() {
                 break; // 主线程已退出
             }
-            thread::sleep(Duration::from_secs(interval as u64));
+            // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
+            // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
+            // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
+            let still_pending =
+                watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
+            let wait = if still_pending { 5 } else { interval };
+            // 睡觉改成带唤醒的等待：有人点「立即刷新」就立刻进入下一轮
+            match trig_rx.recv_timeout(Duration::from_secs(wait as u64)) {
+                Ok(()) => {
+                    // 连点几次会攒下多个信号，先排空，免得接下来几轮白转
+                    while trig_rx.try_recv().is_ok() {}
+                    println!("[poll] 收到刷新请求，立即读一次");
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
     });
 
     // ---- 托盘：必须在跑消息泵的那个线程上创建 ----
+    // 菜单里只有「退出」是不够用的，实测用户左右键点下去都直奔退出：
+    // tray-icon 默认左键也会弹菜单（menu_on_left_click 默认 true），
+    // 于是左键的弹窗和系统菜单同时出现，而菜单里又只有退出一项 —— 左键等于被吃掉。
+    // 修法：左键纯弹窗（关掉它的菜单），右键保留系统菜单并给足内容。
     let menu = Menu::new();
+    let open_panel = MenuItem::new("显示电量面板", true, None);
+    let refresh = MenuItem::new("立即刷新", true, None);
     let quit = MenuItem::new("退出 PowerRing", true, None);
+    menu.append(&open_panel)?;
+    menu.append(&refresh)?;
+    menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
     let quitting = Arc::new(AtomicBool::new(false));
+    // 菜单线程拿不到 TrayIcon（它不是 Send），只能把意图传回主线程，由主线程真正去弹面板
+    let panel_requested = Arc::new(AtomicBool::new(false));
+    let panel_id = open_panel.id().clone();
+    let refresh_id = refresh.id().clone();
     let quit_id = quit.id().clone();
     let flag = quitting.clone();
+    let req = panel_requested.clone();
+    let trigger = trig_tx.clone();
     // MenuEvent 只有在消息泵跑起来之后才会产生，所以这里只是「接」，不是「驱动」
     thread::spawn(move || {
         for ev in MenuEvent::receiver().iter() {
-            if ev.id() == &quit_id {
+            if ev.id() == &panel_id {
+                req.store(true, Ordering::SeqCst);
+            } else if ev.id() == &refresh_id {
+                let _ = trigger.send(());
+            } else if ev.id() == &quit_id {
                 println!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
             }
@@ -245,7 +334,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tooltip("PowerRing 启动中")
         .with_icon(ring_icon(None, false))
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .build()?;
+
+    // 托盘图标的屏幕位置只在 TrayIconEvent 里带出来，菜单事件里没有，
+    // 所以右键点过的那一瞬间把它存下来，给菜单里的「显示电量面板」当锚点。
+    let tray_rect: Arc<Mutex<Option<(i32, i32, i32, i32)>>> = Arc::new(Mutex::new(None));
+
+    // 弹窗窗口必须和消息泵同线程，否则 WM_PAINT 永远到不了
+    popup::create()?;
 
     println!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
 
@@ -254,6 +351,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rx: Receiver<Vec<Status>> = rx;
     while !quitting.load(Ordering::SeqCst) {
         unsafe { pump_messages() };
+
+        // 点击托盘。与 MenuEvent 不同，这里用 try_recv 而非独立线程：
+        // 主循环本来就 20Hz 在转，顺手收一下即可，省一个线程。
+        // 按键分工：左键 = 开关电量面板；右键 = 系统菜单（由 tray-icon 自己弹），
+        // 我们只负责在菜单要冒出来之前把面板收掉，免得置顶面板挡住菜单。
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                button,
+                button_state,
+                rect,
+                ..
+            } = ev
+            {
+                if let Ok(mut g) = tray_rect.lock() {
+                    *g = Some((
+                        rect.position.x as i32,
+                        rect.position.y as i32,
+                        rect.size.width as i32,
+                        rect.size.height as i32,
+                    ));
+                }
+                println!(
+                    "[click] {:?} {:?} rect=({},{}) size=({},{}) 面板当前可见={}",
+                    button,
+                    button_state,
+                    rect.position.x,
+                    rect.position.y,
+                    rect.size.width,
+                    rect.size.height,
+                    popup::is_visible()
+                );
+                match (button, button_state) {
+                    (MouseButton::Left, MouseButtonState::Up) => {
+                        if popup::is_visible() {
+                            popup::hide();
+                        } else {
+                            popup::show(
+                                popup_lines(&latest),
+                                rect.position.x as i32,
+                                rect.position.y as i32,
+                                rect.size.width as i32,
+                                rect.size.height as i32,
+                            );
+                            println!("[popup] 显示 {} 台设备", latest.len());
+                        }
+                    }
+                    (MouseButton::Right, MouseButtonState::Down) => popup::hide(),
+                    _ => {}
+                }
+            }
+        }
+
+        // 菜单里的「显示电量面板」：真正的弹窗动作必须留在这个线程（窗口和泵同线程），
+        // 菜单线程只负责把「有人点了」这个事实递过来。
+        if panel_requested.swap(false, Ordering::SeqCst) {
+            if popup::is_visible() {
+                popup::hide();
+            } else {
+                let anchor = tray_rect.lock().ok().and_then(|g| *g);
+                match anchor {
+                    Some((x, y, w, h)) => popup::show(popup_lines(&latest), x, y, w, h),
+                    // 一次托盘点击都没发生过（比如刚启动就没人点过图标），退回光标位置
+                    None => popup::show_near_cursor(popup_lines(&latest)),
+                }
+                println!("[popup] 菜单打开面板，共 {} 台设备", latest.len());
+            }
+        }
+
+        popup::tick();
 
         let mut changed = false;
         while let Ok(snap) = rx.try_recv() {
@@ -274,6 +440,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[tray] set_tooltip 失败：{e}");
             }
             println!("[tray] tooltip = {:?}", tip);
+
+            // 面板开着时，新读数直接刷到面板上（用户点开它就该看到最新值）
+            if popup::is_visible() {
+                popup::refresh(popup_lines(&latest));
+            }
         }
 
         // 20Hz 轮询消息队列：既保证右键即时响应，空闲 CPU 也几乎为零

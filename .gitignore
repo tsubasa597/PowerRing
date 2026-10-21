@@ -1,3 +1,6 @@
 /target
 *.pdb
 *.exe.bak
+# 本机调试时重定向出来的输出，别进仓库
+run.log
+run.err
