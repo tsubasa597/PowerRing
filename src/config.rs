@@ -16,6 +16,9 @@ pub struct Config {
     pub low_critical: u8,
     /// 低电量时弹卡片提醒。关掉后阈值仍驱动电量环配色，只是不再主动弹
     pub notify_enabled: bool,
+    /// 提醒走哪条路：「card」= 自绘卡片（贴托盘图标上方）；「toast」= 系统通知（进通知中心）。
+    /// 存字符串而不是 bool：以后加第三种方式不用改字段名
+    pub notify_style: String,
     pub language: String,
     pub theme: String,
     pub autostart: bool,
@@ -29,6 +32,7 @@ impl Default for Config {
             low_warn: 20,
             low_critical: 10,
             notify_enabled: true,
+            notify_style: "card".into(),
             language: "zh-CN".into(),
             theme: "system".into(),
             autostart: false,

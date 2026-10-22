@@ -31,6 +31,17 @@ features = [
     "Win32_Security",
     # M2：深色主题下把窗口标题栏也变深（DWM 属性）
     "Win32_Graphics_Dwm",
+    # M2：系统通知（进通知中心）。Toast 是 WinRT 接口，XML 要用 XmlDocument 拼
+    # Toast 是 WinRT 接口，走的是 WinRT 那棵命名空间：feature 名**不带** Win32_ 前缀
+    # （Win32_UI_Notifications 是另一回事 —— 那是 Shell 的老式通知区 API）
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    # 上面两个依赖 COM 初始化；快捷方式（通知中心认人的凭据）也走 COM
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    # PROPVARIANT 被 feature 门在这个模块里，写快捷方式的 AUMID 属性要用
+    "Win32_System_Variant",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先

@@ -19,6 +19,7 @@ mod config;
 mod device;
 mod hidpp;
 mod log;
+mod notify;
 mod popup;
 mod settings;
 mod theme;
@@ -220,6 +221,25 @@ fn icon_rect(tray: &TrayIcon) -> Option<(i32, i32, i32, i32)> {
     ))
 }
 
+/// 发一次低电量提醒。按设置里选的方式走：系统通知 或 自绘卡片。
+///
+/// 系统通知失败时**退回卡片**而不是什么都不做 —— 提醒漏掉一次，
+/// 比弹在不那么理想的位置严重得多（用户可能正等着它去充电）。
+/// 原因写进日志，便于事后查是哪一步不行。
+fn fire_alert(lines: Vec<Line>, title: &str, anchor: Option<(i32, i32, i32, i32)>) {
+    if settings::toast_style() && notify::available() {
+        let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        match notify::show(title, &texts) {
+            Ok(()) => {
+                info!("[alert] 已发系统通知：{}", title);
+                return;
+            }
+            Err(e) => warn!("[alert] 系统通知发送失败（{}），退回托盘卡片", e),
+        }
+    }
+    popup::alert(lines, title, anchor);
+}
+
 fn swatch_of(s: &Status) -> (u8, u8, u8) {
     match s.percent {
         None => (150, 150, 150),     // 未知：灰
@@ -306,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings::set_interval(interval);
     settings::set_low(cfg.low_warn, cfg.low_critical);
     settings::set_notify(cfg.notify_enabled);
+    settings::set_toast_style(cfg.notify_style == "toast");
     // 配色要在建窗口之前定下来：设置窗口和弹窗卡片都是按此刻的主题画的
     theme::set_mode(theme::Mode::from_str(&cfg.theme));
 
@@ -314,6 +335,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 放在单实例闸之后 —— 它改的是磁盘状态，一个进程做一次就够。
     // 反过来（注册表里有、config 说不要）不动：那多半是用户自己加的
     autostart::repair(cfg.autostart);
+
+    // 系统通知要声明应用标识、并确保开始菜单有快捷方式（通知中心靠它归档）。
+    // 失败不致命 —— 提醒会退回自绘卡片，所以这里只是记一条日志
+    let toast_ok = notify::init();
+    if settings::toast_style() && !toast_ok {
+        warn!("[notify] 配置里选了系统通知但它不可用，提醒将退回托盘卡片");
+    }
 
     // ---- 轮询线程：只管读设备，结果塞进 channel ----
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，
@@ -656,7 +684,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Vec<_>>()
             };
             info!("[alert] 试一次：弹出 {} 台设备", latest.len());
-            popup::alert(lines, "提醒卡片（试一次）", icon_rect(&tray));
+            fire_alert(lines, "提醒（试一次）", icon_rect(&tray));
         }
 
         // 低电量提醒：绝大多数轮次收到的是空数组，只有真跨档了才有内容
@@ -688,7 +716,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => "主屏右下角".to_string(),
                 }
             );
-            popup::alert(lines, title, anchor);
+            fire_alert(lines, title, anchor);
         }
 
         popup::tick();
