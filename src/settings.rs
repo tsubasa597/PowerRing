@@ -9,19 +9,25 @@
 //! 不认 config —— 用户可能在任务管理器里禁掉过它，那份开关 config 看不到。
 
 use crate::config::Config;
-use crate::ui::{create_font, font_px as ui_font_px, px};
+use crate::theme::{self, Colors};
+use crate::ui::{create_font, font_px as ui_font_px, px, rgb};
 use crate::info;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+use windows::Win32::Graphics::Gdi::{
+    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, FrameRect, LineTo, MoveToEx,
+    InvalidateRect, SelectObject, SetBkColor, SetBkMode, SetTextColor, DRAW_TEXT_FORMAT, HBRUSH,
+    HDC, HGDIOBJ, PEN_STYLE, TRANSPARENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
-    GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-    WNDCLASSW, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, WM_CLOSE, WM_COMMAND, WM_SETFONT,
+    GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW,
+    ShowWindow, WNDCLASSW, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP,
+    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_SETFONT, WM_SETTINGCHANGE, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 // 复选框的勾选状态。常量本体在 Win32_UI_Controls 里，为两个整数再开一个 feature 不值
@@ -29,6 +35,37 @@ const BM_GETCHECK: u32 = 240;
 const BM_SETCHECK: u32 = 241;
 const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
+
+// 按钮和复选框都改成自绘（BS_OWNERDRAW）。
+// 原因：标准按钮在启用视觉样式时根本不理 WM_CTLCOLORBTN 返回的颜色 ——
+// 深色窗口上摆一排浅灰按钮，比不做深色还难看。自绘是唯一能真正控住颜色的路子，
+// 顺带浅色下也比系统经典控件更贴合弹窗的观感。
+// BS_* 常量在 windows crate 里是 i32，跟着它走
+const BS_OWNERDRAW: i32 = 0x000B;
+// 自绘状态位
+const ODS_SELECTED: u32 = 0x0001;
+const ODS_CHECKED: u32 = 0x0008;
+// DrawTextW 的排版方式。DT_NOPREFIX 不能省：否则文字里的 & 会被当成快捷键下划线
+const DT_CENTER: u32 = 0x0001;
+const DT_VCENTER: u32 = 0x0004;
+const DT_SINGLELINE: u32 = 0x0020;
+const DT_NOPREFIX: u32 = 0x0800;
+
+/// WM_DRAWITEM 带过来的绘制描述。
+/// windows crate 把它放在 Win32_UI_Controls 里，为这一个结构去开那个大 feature 不值；
+/// 它是 Win32 公开的 ABI 结构，自己按同样布局声明一份是安全的
+#[repr(C)]
+struct DRAWITEMSTRUCT {
+    _ctl_type: u32,
+    ctl_id: u32,
+    _item_id: u32,
+    _item_action: u32,
+    item_state: u32,
+    hwnd_item: HWND,
+    hdc: HDC,
+    rc_item: RECT,
+    _item_data: usize,
+}
 
 // 控件 ID：子窗口 ID 是塞在 CreateWindowExW 的 hMenu 位里的，必须自己编号
 const ID_INTERVAL: isize = 1001;
@@ -40,12 +77,13 @@ const ID_STATUS: isize = 1020;
 const ID_NOTIFY: isize = 1030;
 const ID_TEST: isize = 1040;
 const ID_AUTO: isize = 1050;
+const ID_THEME: isize = 1060;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
 // 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 286.0;
+const BASE_H: f32 = 316.0;
 const MARGIN: f32 = 16.0;
 const ROW_TOP: f32 = 20.0;
 const ROW_PITCH: f32 = 36.0;
@@ -62,8 +100,10 @@ const TEST_W: f32 = 60.0;
 const TEST_X: f32 = MARGIN + CHECK_W + 8.0;
 /// 开机自启紧跟提醒那一行
 const CHECK2_Y: f32 = CHECK_Y + 30.0;
-const STATUS_Y: f32 = 192.0;
-const BTN_Y: f32 = 236.0;
+/// 主题切换按钮占整行，挨着自启
+const THEME_Y: f32 = CHECK2_Y + 30.0;
+const STATUS_Y: f32 = 222.0;
+const BTN_Y: f32 = 266.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 30.0;
 const BTN_GAP: f32 = 16.0;
@@ -75,6 +115,13 @@ static HW_CRITICAL: AtomicIsize = AtomicIsize::new(0);
 static HW_STATUS: AtomicIsize = AtomicIsize::new(0);
 static HW_NOTIFY: AtomicIsize = AtomicIsize::new(0);
 static HW_AUTO: AtomicIsize = AtomicIsize::new(0);
+static HW_THEME: AtomicIsize = AtomicIsize::new(0);
+// WM_CTLCOLOR 要返回一个画刷，而系统在返回之后还要用它 —— 不能每次现造现删。
+// 所以缓存一个，颜色变了才重建（切换主题时 key 变化，旧的被删掉）
+static BRUSH_WIN: AtomicIsize = AtomicIsize::new(0);
+static BRUSH_WIN_KEY: AtomicU32 = AtomicU32::new(0);
+static BRUSH_EDIT: AtomicIsize = AtomicIsize::new(0);
+static BRUSH_EDIT_KEY: AtomicU32 = AtomicU32::new(0);
 /// 当前生效的刷新间隔。轮询线程每轮直接读它，改完设置不用重启程序
 static INTERVAL: AtomicU32 = AtomicU32::new(60);
 /// 当前生效的两档低电量阈值。电量环配色和提醒判断都读它，
@@ -210,13 +257,11 @@ fn wide_nul(s: &str) -> Vec<u16> {
 
 /// 注册窗口类、创建窗口和全部控件。必须和消息泵同线程。
 pub fn create() -> Result<(), windows::core::Error> {
-    // 窗口背景给白色：静态控件默认底色是按钮灰，不统一会很脏。
-    // 刷子故意不 DeleteObject —— 它属于窗口类，进程活着就一直要用。
-    let bg = unsafe { CreateSolidBrush(crate::ui::rgb(255, 255, 255)) };
+    // 背景刷子**不在这里给**：窗口类上的刷子是死的，切主题时换不掉。
+    // 改由 WM_ERASEBKGND 每次按当前主题填背景。
     let class = WNDCLASSW {
         lpfnWndProc: Some(wndproc),
         lpszClassName: w!("PowerRingSettings"),
-        hbrBackground: bg,
         ..Default::default()
     };
     unsafe {
@@ -291,7 +336,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let notify = make(
             w!("BUTTON"),
             "低电量时提醒我",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_AUTOCHECKBOX | BS_OWNERDRAW) as u32),
             px(MARGIN),
             px(CHECK_Y),
             px(CHECK_W),
@@ -308,7 +353,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let test = make(
             w!("BUTTON"),
             "试一次",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
             px(TEST_X),
             px(CHECK_Y),
             px(TEST_W),
@@ -322,7 +367,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let auto = make(
             w!("BUTTON"),
             "开机时自动启动",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_AUTOCHECKBOX | BS_OWNERDRAW) as u32),
             px(MARGIN),
             px(CHECK2_Y),
             px(BASE_W - MARGIN * 2.0),
@@ -332,6 +377,22 @@ pub fn create() -> Result<(), windows::core::Error> {
         );
         set_font(auto, font);
         HW_AUTO.store(auto.0 as isize, Ordering::SeqCst);
+
+        // 主题三态（跟随系统/浅色/深色）用一个按钮循环切换，而不是下拉框：
+        // 标准 COMBOBOX 在深色下要自绘整个列表，代价远超它带来的价值
+        let theme_btn = make(
+            w!("BUTTON"),
+            &theme::current_mode().label(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
+            px(MARGIN),
+            px(THEME_Y),
+            px(BASE_W - MARGIN * 2.0),
+            px(BTN_H),
+            wnd,
+            ID_THEME,
+        );
+        set_font(theme_btn, font);
+        HW_THEME.store(theme_btn.0 as isize, Ordering::SeqCst);
 
         let status = make(
             w!("STATIC"),
@@ -352,7 +413,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let save = make(
             w!("BUTTON"),
             "保存",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_DEFPUSHBUTTON | BS_OWNERDRAW) as u32),
             bx,
             px(BTN_Y),
             px(BTN_W),
@@ -363,7 +424,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let cancel = make(
             w!("BUTTON"),
             "取消",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
             bx + px(BTN_W + BTN_GAP),
             px(BTN_Y),
             px(BTN_W),
@@ -391,6 +452,8 @@ pub fn open() {
         // （任务管理器的「启动」页、或者清理软件删过启动项），config 不知道那些事
         let auto = crate::autostart::is_enabled();
         set_check(ctl(&HW_AUTO), auto);
+        // 主题按钮的标签里写着「当前深色/浅色」，每次打开都要按此刻的状态重算
+        set_text(ctl(&HW_THEME), &theme::current_mode().label());
         if cfg.autostart != auto {
             info!(
                 "[settings] 自启意图（config）={} 但注册表实际={}，按注册表显示",
@@ -404,6 +467,9 @@ pub fn open() {
         let x = vx + (vw - w) / 2;
         let y = vy + (vh - h) / 2;
         let _ = SetWindowPos(hwnd(), Some(HWND_TOP), x, y, w, h, Default::default());
+        // 标题栏的颜色归 DWM 管，不归我们画 —— 深色模式下不单独说一声，
+        // 窗口顶上会留一条白标题栏，比不做深色还扎眼
+        apply_titlebar_theme();
         let _ = ShowWindow(hwnd(), SW_SHOW);
         // 先显示再校准：客户区只有窗口真实存在后才量得准
         fit_client();
@@ -452,6 +518,8 @@ fn on_save() {
     cfg.low_critical = critical;
     cfg.notify_enabled = notify;
     cfg.autostart = auto;
+    // 主题是点了就生效的，保存时把此刻的模式记下来就行
+    cfg.theme = theme::current_mode().as_str().to_string();
     cfg.save();
     set_interval(interval);
     set_low(warn, critical);
@@ -486,9 +554,150 @@ fn on_save() {
     }
     set_status(&tip);
     info!(
-        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）",
-        interval, warn, critical, notify, auto, auto_was
+        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）主题={}",
+        interval, warn, critical, notify, auto, auto_was, cfg.theme
     );
+}
+
+/// 让标题栏跟随深色/浅色。
+///
+/// 这条属性（DWMWA_USE_IMMERSIVE_DRAW_MODE 那一族里的第 20 号）在 Win10 上属于
+/// 「能用但没写进文档」的那类：设置了没效果也不会报错，最坏的结果就是标题栏不变色。
+/// 所以它失败也无所谓，返回值直接丢掉。
+unsafe fn apply_titlebar_theme() {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+    let v: i32 = if theme::is_dark() { 1 } else { 0 };
+    let _ = DwmSetWindowAttribute(
+        hwnd(),
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &v as *const i32 as *const core::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+}
+
+/// 取（并缓存）一个纯色画刷。
+///
+/// WM_CTLCOLOR 和自绘都要把画刷交回给系统，系统在返回之后还会用它 ——
+/// 现造现删会让控件画不出来（或者更糟：用到已释放的对象）。
+/// 所以缓存住，只在颜色真的变了的时候重建，把旧的删掉。
+fn brush(cell: &AtomicIsize, key: &AtomicU32, c: (u8, u8, u8)) -> HBRUSH {
+    let k = ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32;
+    let cur = cell.load(Ordering::SeqCst);
+    if cur != 0 && key.load(Ordering::SeqCst) == k {
+        return HBRUSH(cur as *mut core::ffi::c_void);
+    }
+    let hb = unsafe { CreateSolidBrush(rgb(c.0, c.1, c.2)) };
+    let old = cell.swap(hb.0 as isize, Ordering::SeqCst);
+    if old != 0 {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(HBRUSH(old as *mut core::ffi::c_void).0));
+        }
+    }
+    key.store(k, Ordering::SeqCst);
+    hb
+}
+
+/// 在方框里画一个勾。用两条线段而不是字符「√」：
+/// 后者要赌字体里有这个字形，画线段永远不会缺字
+unsafe fn draw_check(hdc: HDC, rc: &RECT, c: &Colors) {
+    let pen = CreatePen(
+        PEN_STYLE(0), // PS_SOLID
+        px(2.0).max(1),
+        rgb(c.win_fg.0, c.win_fg.1, c.win_fg.2),
+    );
+    let old = SelectObject(hdc, HGDIOBJ(pen.0));
+    let _ = MoveToEx(hdc, rc.left + px(3.0), rc.top + (rc.bottom - rc.top) / 2, None);
+    let _ = LineTo(hdc, rc.left + px(6.0), rc.bottom - px(4.0));
+    let _ = LineTo(hdc, rc.right - px(4.0), rc.top + px(3.0));
+    SelectObject(hdc, old);
+    let _ = DeleteObject(HGDIOBJ(pen.0));
+}
+
+/// 自绘一个控件：按钮（含主题切换）或复选框
+unsafe fn draw_item(dis: &DRAWITEMSTRUCT) {
+    let c = theme::colors();
+    let hdc = dis.hdc;
+    let pressed = dis.item_state & ODS_SELECTED != 0;
+    let checked = dis.item_state & ODS_CHECKED != 0;
+    let id = dis.ctl_id as isize;
+    let is_check = id == ID_NOTIFY || id == ID_AUTO;
+
+    // 先把整块填成窗口底色：自绘控件不会自己擦背景，
+    // 少了这一步，切换主题或窗口重绘后会留着上一次的痕迹
+    let win_brush = brush(&BRUSH_WIN, &BRUSH_WIN_KEY, c.win_bg);
+    let _ = FillRect(hdc, &dis.rc_item, win_brush);
+
+    let font = create_font(ui_font_px(9.0));
+    let old = SelectObject(hdc, HGDIOBJ(font.0));
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let _ = SetTextColor(hdc, rgb(c.win_fg.0, c.win_fg.1, c.win_fg.2));
+
+    if is_check {
+        let s = px(14.0);
+        let top = dis.rc_item.top + (dis.rc_item.bottom - dis.rc_item.top - s) / 2;
+        let left = dis.rc_item.left + px(1.0);
+        let rc_box = RECT {
+            left,
+            top,
+            right: left + s,
+            bottom: top + s,
+        };
+        let box_brush = brush(&BRUSH_EDIT, &BRUSH_EDIT_KEY, c.edit_bg);
+        let _ = FillRect(hdc, &rc_box, box_brush);
+        let bd = CreateSolidBrush(rgb(c.btn_border.0, c.btn_border.1, c.btn_border.2));
+        let _ = FrameRect(hdc, &rc_box, bd);
+        let _ = DeleteObject(HGDIOBJ(bd.0));
+        if checked {
+            draw_check(hdc, &rc_box, c);
+        }
+        let mut rc_text = RECT {
+            left: rc_box.right + px(8.0),
+            top: dis.rc_item.top,
+            right: dis.rc_item.right,
+            bottom: dis.rc_item.bottom,
+        };
+        let mut buf: Vec<u16> = text_of(dis.hwnd_item).encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut buf,
+            &mut rc_text,
+            DRAW_TEXT_FORMAT(DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX),
+        );
+    } else {
+        let fill = if pressed { c.btn_pressed } else { c.btn_bg };
+        let fb = CreateSolidBrush(rgb(fill.0, fill.1, fill.2));
+        let _ = FillRect(hdc, &dis.rc_item, fb);
+        let _ = DeleteObject(HGDIOBJ(fb.0));
+        let bd = CreateSolidBrush(rgb(c.btn_border.0, c.btn_border.1, c.btn_border.2));
+        let _ = FrameRect(hdc, &dis.rc_item, bd);
+        let _ = DeleteObject(HGDIOBJ(bd.0));
+        let mut rc = dis.rc_item;
+        let mut buf: Vec<u16> = text_of(dis.hwnd_item).encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut buf,
+            &mut rc,
+            DRAW_TEXT_FORMAT(DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX),
+        );
+    }
+
+    SelectObject(hdc, old);
+    let _ = DeleteObject(HGDIOBJ(font.0));
+}
+
+/// 主题按钮被点：在三态之间循环，并立刻生效。
+/// 立刻生效是刻意的 —— 配色这种东西，点一下没反应就会以为按钮坏了
+fn cycle_theme() {
+    let next = theme::current_mode().next();
+    theme::set_mode(next);
+    set_text(ctl(&HW_THEME), &next.label());
+    unsafe {
+        apply_titlebar_theme();
+        // 整个窗口重绘：背景、静态文字、自绘控件都得跟着换色
+        let _ = InvalidateRect(Some(hwnd()), None, true);
+    }
+    crate::popup::repaint();
+    info!("[settings] 主题切到 {}（深色={}）", next.as_str(), theme::is_dark());
 }
 
 fn set_status(text: &str) {
@@ -592,8 +801,50 @@ unsafe extern "system" fn wndproc(
                 // 真正的弹卡片动作得留给主线程（窗口和消息泵同线程），
                 // 这里只把「有人点了」这个事实递过去
                 ID_TEST => TEST_REQUESTED.store(true, Ordering::SeqCst),
+                ID_THEME => cycle_theme(),
                 _ => {}
             }
+            LRESULT(0)
+        }
+        // 窗口背景按当前主题填。窗口类上不再挂死刷子 —— 挂了就切不了主题
+        WM_ERASEBKGND => {
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let mut rc = RECT::default();
+            if GetClientRect(hwnd, &mut rc).is_ok() {
+                let c = theme::colors();
+                let b = brush(&BRUSH_WIN, &BRUSH_WIN_KEY, c.win_bg);
+                let _ = FillRect(hdc, &rc, b);
+            }
+            LRESULT(1)
+        }
+        // 静态文字和输入框只认这两个消息返回的颜色，所以它们不用自绘就能跟着主题走
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
+            let is_edit = msg == WM_CTLCOLOREDIT;
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let c = theme::colors();
+            let bg = if is_edit { c.edit_bg } else { c.win_bg };
+            let _ = SetTextColor(hdc, rgb(c.win_fg.0, c.win_fg.1, c.win_fg.2));
+            let _ = SetBkColor(hdc, rgb(bg.0, bg.1, bg.2));
+            let b = if is_edit {
+                brush(&BRUSH_EDIT, &BRUSH_EDIT_KEY, bg)
+            } else {
+                brush(&BRUSH_WIN, &BRUSH_WIN_KEY, bg)
+            };
+            LRESULT(b.0 as isize)
+        }
+        WM_DRAWITEM => {
+            let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);
+            draw_item(dis);
+            LRESULT(1)
+        }
+        // 系统设置里换了浅色/深色：Windows 会广播这条消息，我们跟着换，
+        // 连「跟随系统」这一档也才真的跟得上
+        WM_SETTINGCHANGE => {
+            theme::reload();
+            set_text(ctl(&HW_THEME), &theme::current_mode().label());
+            apply_titlebar_theme();
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            crate::popup::repaint();
             LRESULT(0)
         }
         // 标题栏的 ×：隐藏而不是销毁，控件留着下次接着用

@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, RegisterClassW, SetWindowPos,
     ShowWindow, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WM_LBUTTONDOWN,
-    WM_PAINT, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    WM_PAINT, WM_SETTINGCHANGE, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
 };
 
 /// 卡片槽位。索引就是它们在下面各个静态数组里的下标
@@ -242,6 +242,16 @@ pub fn is_visible() -> bool {
     VISIBLE[PANEL].load(Ordering::SeqCst)
 }
 
+/// 让两张卡片按当前主题重画一遍。切换深色/浅色时用：
+/// 卡片可能正挂在屏幕上，不重绘就会一半深一半浅
+pub fn repaint() {
+    for idx in 0..N {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd(idx)), None, true);
+        }
+    }
+}
+
 /// 卡片开着时来了新读数：换掉内容并重绘。
 /// 不重置超时计时 —— 面板只是被动刷新，不该因为它一直有人看着就永不消失。
 pub fn refresh(lines: Vec<Line>) {
@@ -295,6 +305,13 @@ unsafe extern "system" fn wndproc(
             hide_card(idx_of(hwnd));
             LRESULT(0)
         }
+        // 用户在系统设置里换了浅色/深色：重算配色并重绘。
+        // 这张卡片可能正开着，不重绘的话会一半深一半浅
+        WM_SETTINGCHANGE => {
+            crate::theme::reload();
+            repaint();
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -312,8 +329,9 @@ unsafe fn paint(hwnd: HWND, idx: usize) {
         return;
     }
 
-    // 背景：浅色（卡片暂不跟随主题，深色主题是 M2 的事）
-    let bg = CreateSolidBrush(rgb(250, 250, 252));
+    // 背景取自当前主题：这张卡片就贴在托盘旁边，托盘所在的任务栏可能是深色的
+    let c = crate::theme::colors();
+    let bg = CreateSolidBrush(rgb(c.card_bg.0, c.card_bg.1, c.card_bg.2));
     let _ = FillRect(hdc, &rc, bg);
     let _ = DeleteObject(bg.into());
 
@@ -327,7 +345,7 @@ unsafe fn paint(hwnd: HWND, idx: usize) {
     let inset = ui::px(8.0);
 
     // 标题
-    let _ = SetTextColor(hdc, rgb(70, 70, 70));
+    let _ = SetTextColor(hdc, rgb(c.card_title.0, c.card_title.1, c.card_title.2));
     let title = if let Ok(g) = TITLES[idx].lock() {
         wide(&g)
     } else {
@@ -350,7 +368,7 @@ unsafe fn paint(hwnd: HWND, idx: usize) {
             let _ = FillRect(hdc, &srect, sw);
             let _ = DeleteObject(sw.into());
 
-            let _ = SetTextColor(hdc, rgb(40, 40, 40));
+            let _ = SetTextColor(hdc, rgb(c.card_text.0, c.card_text.1, c.card_text.2));
             let w = wide(text);
             let _ = TextOutW(hdc, pad() + ui::px(20.0), y + inset, &w);
         }

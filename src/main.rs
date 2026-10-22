@@ -21,6 +21,7 @@ mod hidpp;
 mod log;
 mod popup;
 mod settings;
+mod theme;
 mod ui;
 mod profile;
 
@@ -75,6 +76,9 @@ fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
     let r_out = 15.2_f32;
     let r_in = 10.8_f32;
     let filled_deg = percent.unwrap_or(0).min(100) as f32 / 100.0 * 360.0;
+    // 未填充部分和「未知」整环取当前主题的灰：深色任务栏上用浅色主题那种深灰会看不清
+    let dim = crate::theme::colors().ring_empty;
+    let unknown = crate::theme::colors().ring_unknown;
 
     for y in 0..S {
         for x in 0..S {
@@ -90,9 +94,9 @@ fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
                 ang += 360.0;
             }
             let (r, g, b) = match percent {
-                None => (110, 110, 110), // 未知：整环灰
+                None => unknown, // 未知：整环灰
                 Some(p) if ang <= filled_deg => color_of(p, charging),
-                Some(_) => (75, 75, 75), // 未填充部分：深灰
+                Some(_) => dim, // 未填充部分
             };
             let i = (y * S + x) * 4;
             rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
@@ -302,6 +306,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings::set_interval(interval);
     settings::set_low(cfg.low_warn, cfg.low_critical);
     settings::set_notify(cfg.notify_enabled);
+    // 配色要在建窗口之前定下来：设置窗口和弹窗卡片都是按此刻的主题画的
+    theme::set_mode(theme::Mode::from_str(&cfg.theme));
 
     // 开机自启自检：config 里说要自启、注册表里却没有，就补回去。
     // 会走到这一步的情况：exe 挪过位置、被清理软件删过启动项、config 是拷来的。
@@ -555,6 +561,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 主线程：消息泵 + 渲染 ----
     let mut latest: Vec<Status> = Vec::new();
+    // 盯着配色有没有变，变了要重画托盘图标（见主循环里的注释）
+    let mut seen_dark = theme::is_dark();
     let rx: Receiver<Vec<Status>> = rx;
     while !quitting.load(Ordering::SeqCst) {
         unsafe { pump_messages() };
@@ -684,6 +692,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         popup::tick();
+
+        // 配色变了就重画：托盘图标平时只在读数变化时更新，不盯着这里会一直保持旧配色。
+        // 变化来源有两个 —— 设置窗口里切主题，以及用户在系统设置里换了浅色/深色
+        let dark = theme::is_dark();
+        if dark != seen_dark {
+            seen_dark = dark;
+            let lowest = latest.iter().filter_map(|s| s.percent).min();
+            let any_charging = latest.iter().any(|s| s.charging);
+            if let Err(e) = tray.set_icon(Some(ring_icon(lowest, any_charging))) {
+                warn!("[tray] 换配色后重设图标失败：{e}");
+            }
+            popup::repaint();
+            info!("[theme] 配色已切换，图标与卡片重绘");
+        }
 
         let mut changed = false;
         while let Ok(snap) = rx.try_recv() {

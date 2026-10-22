@@ -29,6 +29,8 @@ features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_Security",
+    # M2：深色主题下把窗口标题栏也变深（DWM 属性）
+    "Win32_Graphics_Dwm",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先
