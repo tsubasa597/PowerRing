@@ -6,6 +6,8 @@
 # 协议常量属事实信息，来源见 protocol_source。本项目未复制其任何源码。
 
 name: "HyperX Cloud Flight"
+# 托盘悬停用的短名
+short: "Cloud Flight"
 
 # raw = 原始报文：请求/响应都是裸字节，格式写在本文件里。
 # 与罗技的差别在于它没有「feature 号 + 函数号」那套统一寻址，

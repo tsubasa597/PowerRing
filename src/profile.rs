@@ -38,6 +38,10 @@ pub enum Transport {
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,
+    /// 托盘悬停文字用的短名。同时挂好几台设备时全名拼起来会很长，
+    /// 而这个位置只有一两秒的阅读时间，短名才扫得完。
+    /// 不填就用全名 —— 完整名字始终在左键面板里，不会丢信息
+    pub short_name: Option<String>,
     pub protocol: Protocol,
     pub transport: Transport,
     pub vid: u16,
@@ -63,6 +67,8 @@ pub struct Profile {
 #[derive(Debug, Deserialize)]
 struct Raw {
     name: String,
+    #[serde(default)]
+    short: Option<String>,
     #[serde(default)]
     protocol: String,
     #[serde(default)]
@@ -238,8 +244,12 @@ impl Raw {
             None => None,
         };
 
+        // 短名留空就用全名，但去掉首尾空白：YAML 里顺手写的空格不该进到界面上
+        let short_name = self.short.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
         Ok(Profile {
             name: self.name,
+            short_name,
             protocol,
             transport,
             vid,

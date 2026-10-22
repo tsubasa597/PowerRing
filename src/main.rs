@@ -44,6 +44,8 @@ use crate::popup::Line;
 /// 轮询线程交给主线程的一次快照
 struct Status {
     name: String,
+    /// 托盘悬停用的短名。完整名单在左键面板里
+    short: String,
     percent: Option<u8>,
     charging: bool,
 }
@@ -135,17 +137,47 @@ unsafe fn pump_messages() {
     }
 }
 
+/// 托盘悬停文字最多列几台。悬停只有一两秒的阅读时间，
+/// 列再多也看不完；完整名单在左键面板里
+const TIP_MAX_ITEMS: usize = 3;
+/// Windows 的 szTip 最多 128 字符，留出余量。超了会被系统从中间截断成半句话
+const TIP_MAX_CHARS: usize = 100;
+
+/// 托盘悬停文字。设备一多，全名逐个拼起来会长到既读不完、又会被系统截断，
+/// 所以多设备时改用短名，并且最多列 3 台。单设备时用全名 —— 那点长度不值一提，
+/// 反而是「这是哪台」最该说清楚的时候。
 fn tooltip_of(list: &[Status]) -> String {
     if list.is_empty() {
         return "PowerRing — 未检测到设备".to_string();
     }
-    list.iter()
-        .map(|s| match s.percent {
-            Some(p) => format!("{} {}%{}", s.name, p, if s.charging { " 充电中" } else { "" }),
-            None => format!("{} --", s.name),
-        })
-        .collect::<Vec<_>>()
-        .join(" / ")
+    if list.len() == 1 {
+        return tip_line(&list[0], &list[0].name);
+    }
+
+    // 电量低的排前面：悬停最可能想看的就是「哪台该充电了」。读不到电量的排最后
+    let mut sorted: Vec<&Status> = list.iter().collect();
+    sorted.sort_by_key(|s| s.percent.unwrap_or(u8::MAX));
+
+    let mut parts: Vec<String> = sorted
+        .iter()
+        .take(TIP_MAX_ITEMS)
+        .map(|s| tip_line(s, &s.short))
+        .collect();
+    if sorted.len() > TIP_MAX_ITEMS {
+        parts.push(format!("等 {} 台", sorted.len()));
+    }
+    // 装不下就砍掉末尾。宁可少列一台，也不要被系统截成半句话
+    while parts.len() > 1 && parts.join(" · ").chars().count() > TIP_MAX_CHARS {
+        parts.pop();
+    }
+    parts.join(" · ")
+}
+
+fn tip_line(s: &Status, name: &str) -> String {
+    match s.percent {
+        Some(p) => format!("{} {}%{}", name, p, if s.charging { " 充电" } else { "" }),
+        None => format!("{} --", name),
+    }
 }
 
 /// 弹窗里的行。色块颜色与托盘电量环共用同一套语义，
@@ -517,6 +549,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .map(|w| Status {
                     name: w.dev.name.clone(),
+                    short: w.dev.short.clone(),
                     percent: w.percent,
                     charging: w.charging,
                 })
@@ -791,4 +824,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("[tray] 正在退出");
     drop(tray);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tooltip_of, Status, TIP_MAX_CHARS};
+
+    fn s(name: &str, short: &str, pct: Option<u8>) -> Status {
+        Status {
+            name: name.to_string(),
+            short: short.to_string(),
+            percent: pct,
+            charging: false,
+        }
+    }
+
+    #[test]
+    fn 单设备用全名() {
+        let t = tooltip_of(&[s("Logitech G PRO Wireless", "GPW", Some(18))]);
+        assert_eq!(t, "Logitech G PRO Wireless 18%");
+    }
+
+    #[test]
+    fn 多设备用短名且电量低的在前() {
+        let t = tooltip_of(&[
+            s("HyperX Cloud Flight", "Cloud Flight", Some(60)),
+            s("Logitech G PRO Wireless", "GPW", Some(18)),
+        ]);
+        assert_eq!(t, "GPW 18% · Cloud Flight 60%");
+    }
+
+    #[test]
+    fn 超过三台只列三台并说明总数() {
+        let list: Vec<Status> = (0..5)
+            .map(|i| s(&format!("设备{i}全名"), &format!("D{i}"), Some(10 + i)))
+            .collect();
+        let t = tooltip_of(&list);
+        assert!(t.contains("等 5 台"), "实际：{t}");
+        // 列出来的三台应该是电量最低的那三台
+        assert!(t.starts_with("D0 10% · D1 11% · D2 12%"), "实际：{t}");
+    }
+
+    #[test]
+    fn 读不到电量的排在最后() {
+        let t = tooltip_of(&[
+            s("未知设备", "未知", None),
+            s("HyperX Cloud Flight", "Cloud Flight", Some(60)),
+        ]);
+        assert_eq!(t, "Cloud Flight 60% · 未知 --");
+    }
+
+    /// 这条守的是「将来加了第三台、第四台设备」：名字再长也不会被系统截成半句话
+    #[test]
+    fn 再长也不会超过托盘文字上限() {
+        let long = "超长设备名称".repeat(10);
+        let list: Vec<Status> = (0..6).map(|i| s(&long, &long, Some(i))).collect();
+        let t = tooltip_of(&list);
+        assert!(
+            t.chars().count() <= TIP_MAX_CHARS,
+            "悬停文字 {} 字符，超过上限 {TIP_MAX_CHARS}",
+            t.chars().count()
+        );
+    }
 }

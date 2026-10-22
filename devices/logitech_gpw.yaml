@@ -6,6 +6,8 @@
 # 协议常量属事实信息（来源见 protocol_source），本项目未复制 Solaar 等 GPL 项目的源码。
 
 name: "Logitech G PRO Wireless"
+# 托盘悬停用的短名。多设备时悬停文字用短名拼，完整名始终在左键面板里
+short: "GPW"
 
 # 协议族：目前支持 hid++2.0
 protocol: "hid++2.0"
