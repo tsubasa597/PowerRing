@@ -14,6 +14,7 @@
 // 代价是调试时看不到实时输出，换来的是双击运行不再弹黑框。
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod autostart;
 mod config;
 mod device;
 mod hidpp;
@@ -222,9 +223,45 @@ fn swatch_of(s: &Status) -> (u8, u8, u8) {
     }
 }
 
+/// 只允许一个 PowerRing 在跑。返回 false 表示已经有实例了，本进程该退出。
+///
+/// 为什么非做不可：开了开机自启之后，用户很可能再手动双击一次 exe ——
+/// 没有这道闸就会冒出第二个托盘图标，两个进程还同时轮询同一台设备。
+/// 用命名互斥量而不是「查进程列表」：进程一旦结束（哪怕是崩的），
+/// 内核会把它收回去，不会留下「下次再也启动不了」的残局。
+fn claim_single_instance() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "PowerRing.SingleInstance"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
+            // 句柄故意不关：关了锁就放了，得让它活到进程结束。
+            // 互斥量是内核对象，进程退出时自动释放
+            Ok(_) => GetLastError() != ERROR_ALREADY_EXISTS,
+            Err(e) => {
+                // 建不了锁只影响「防多开」，不影响电量监测本身，让它继续启动
+                warn!("[startup] 建不了互斥量：{e}，按单实例处理失败，继续启动");
+                true
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 日志放在最前面：后面任何一步出问题，都要有地方可查
     log::init();
+
+    // 开机自启的配套：已经有一个在跑就直接退出，别再挂一个托盘图标。
+    // 放在日志之后，好让「双击了却没反应」这件事在日志里留得下痕迹
+    if !claim_single_instance() {
+        info!("[startup] 已经有一个 PowerRing 在跑了，本进程退出");
+        return Ok(());
+    }
 
     // Windows：给进程一个明确的 AppUserModelID，托盘通知才会归属到 PowerRing
     #[cfg(windows)]
@@ -265,6 +302,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings::set_interval(interval);
     settings::set_low(cfg.low_warn, cfg.low_critical);
     settings::set_notify(cfg.notify_enabled);
+
+    // 开机自启自检：config 里说要自启、注册表里却没有，就补回去。
+    // 会走到这一步的情况：exe 挪过位置、被清理软件删过启动项、config 是拷来的。
+    // 放在单实例闸之后 —— 它改的是磁盘状态，一个进程做一次就够。
+    // 反过来（注册表里有、config 说不要）不动：那多半是用户自己加的
+    autostart::repair(cfg.autostart);
 
     // ---- 轮询线程：只管读设备，结果塞进 channel ----
     // hidapi 的设备句柄不能跨线程（Device 不是 Send），所以 HidApi 必须在线程内部创建，

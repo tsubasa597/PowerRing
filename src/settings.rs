@@ -1,11 +1,12 @@
-//! F11 设置窗口：刷新间隔 + 两档低电量阈值，保存后立即生效
+//! F11 设置窗口：刷新间隔 + 两档低电量阈值 + 提醒开关 + 开机自启，保存后立即生效
 //!
 //! 控件用的是 Win32 标准子控件（STATIC / EDIT / BUTTON），不是自绘。
 //! 理由和托盘面板一样（§8.4 ADR-001）：不引 GUI 框架，编译速度优先。
 //! 标准控件的代价是外观朴素（系统经典样式），换来的是零依赖、零自绘代码。
 //!
-//! M1 只做「改了就能立刻用」的三项。开机自启要动注册表，放到 M2 再做 ——
-//! 现在的菜单里也就不给它留位置，免得摆一个点了没反应的开关。
+//! M1 只做「改了就能立刻用」的三项；M2 补上开机自启（要动注册表）。
+//! 自启这一项的显示状态每次都重新问注册表（autostart::is_enabled），
+//! 不认 config —— 用户可能在任务管理器里禁掉过它，那份开关 config 看不到。
 
 use crate::config::Config;
 use crate::ui::{create_font, font_px as ui_font_px, px};
@@ -38,12 +39,13 @@ const ID_CANCEL: isize = 1011;
 const ID_STATUS: isize = 1020;
 const ID_NOTIFY: isize = 1030;
 const ID_TEST: isize = 1040;
+const ID_AUTO: isize = 1050;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
 // 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 264.0;
+const BASE_H: f32 = 286.0;
 const MARGIN: f32 = 16.0;
 const ROW_TOP: f32 = 20.0;
 const ROW_PITCH: f32 = 36.0;
@@ -58,8 +60,10 @@ const CHECK_H: f32 = 24.0;
 const CHECK_W: f32 = BASE_W - MARGIN * 2.0 - 68.0;
 const TEST_W: f32 = 60.0;
 const TEST_X: f32 = MARGIN + CHECK_W + 8.0;
-const STATUS_Y: f32 = 166.0;
-const BTN_Y: f32 = 214.0;
+/// 开机自启紧跟提醒那一行
+const CHECK2_Y: f32 = CHECK_Y + 30.0;
+const STATUS_Y: f32 = 192.0;
+const BTN_Y: f32 = 236.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 30.0;
 const BTN_GAP: f32 = 16.0;
@@ -70,6 +74,7 @@ static HW_WARN: AtomicIsize = AtomicIsize::new(0);
 static HW_CRITICAL: AtomicIsize = AtomicIsize::new(0);
 static HW_STATUS: AtomicIsize = AtomicIsize::new(0);
 static HW_NOTIFY: AtomicIsize = AtomicIsize::new(0);
+static HW_AUTO: AtomicIsize = AtomicIsize::new(0);
 /// 当前生效的刷新间隔。轮询线程每轮直接读它，改完设置不用重启程序
 static INTERVAL: AtomicU32 = AtomicU32::new(60);
 /// 当前生效的两档低电量阈值。电量环配色和提醒判断都读它，
@@ -313,6 +318,21 @@ pub fn create() -> Result<(), windows::core::Error> {
         );
         set_font(test, font);
 
+        // 开机自启整行占满，它右边没有配套按钮
+        let auto = make(
+            w!("BUTTON"),
+            "开机时自动启动",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            px(MARGIN),
+            px(CHECK2_Y),
+            px(BASE_W - MARGIN * 2.0),
+            px(CHECK_H),
+            wnd,
+            ID_AUTO,
+        );
+        set_font(auto, font);
+        HW_AUTO.store(auto.0 as isize, Ordering::SeqCst);
+
         let status = make(
             w!("STATIC"),
             "",
@@ -367,6 +387,17 @@ pub fn open() {
         set_text(ctl(&HW_STATUS), "");
         set_check(ctl(&HW_NOTIFY), cfg.notify_enabled);
 
+        // 自启这一格的勾选状态问注册表，不问 config —— 用户可能在设置之外改过它
+        // （任务管理器的「启动」页、或者清理软件删过启动项），config 不知道那些事
+        let auto = crate::autostart::is_enabled();
+        set_check(ctl(&HW_AUTO), auto);
+        if cfg.autostart != auto {
+            info!(
+                "[settings] 自启意图（config）={} 但注册表实际={}，按注册表显示",
+                cfg.autostart, auto
+            );
+        }
+
         // 居中于虚拟桌面，双屏时才不会跑到某一块的角落
         let (vx, vy, vw, vh) = crate::ui::virtual_screen();
         let (w, h) = outer_size();
@@ -411,26 +442,52 @@ fn on_save() {
 
     let mut cfg = Config::load();
     let notify = is_checked(ctl(&HW_NOTIFY));
+    // 打开窗口时没记下这个状态，这里重新问一次注册表：
+    // 用户在窗口开着的那几十秒里完全可能从任务管理器里改了启动项
+    let auto = is_checked(ctl(&HW_AUTO));
+    let auto_was = crate::autostart::is_enabled();
 
     cfg.poll_interval_secs = interval;
     cfg.low_warn = warn;
     cfg.low_critical = critical;
     cfg.notify_enabled = notify;
+    cfg.autostart = auto;
     cfg.save();
     set_interval(interval);
     set_low(warn, critical);
     set_notify(notify);
+
     // 这句提示有实际用处：勾回开关的当下不会补弹一张旧提醒（那次跨档早就过去了），
     // 不说清楚的话，用户点了保存却发现啥也没弹，只会以为开关没生效
-    let tip = if notify {
-        "已保存；电量再次跌破阈值的那一刻才会提醒"
+    let mut tip: String = if notify {
+        "已保存；电量再次跌破阈值的那一刻才会提醒".into()
     } else {
-        "已保存；提醒已关闭，环色仍按阈值变化"
+        "已保存；提醒已关闭，环色仍按阈值变化".into()
     };
-    set_status(tip);
+
+    // 只在勾选状态真的变了才动注册表。没变还写一遍的话，
+    // 会把「用户自己在外面加的、指向别的路径的启动项」覆盖掉 —— 那是他的设置，
+    // 不该被我们这边的保存按钮抹掉
+    if auto != auto_was {
+        match crate::autostart::set(auto) {
+            Ok(()) => {
+                tip = if auto {
+                    "已保存；已加入开机启动，下次登录时自动运行".into()
+                } else {
+                    "已保存；已从开机启动里移除".into()
+                };
+            }
+            // 写失败（公司电脑的常见情况：注册表被策略挡住）值得盖掉默认提示 ——
+            // 用户点的是「勾上」，界面却什么都不说，他只会以为已经生效
+            Err(e) => {
+                tip = format!("开机自启{}失败：{}", if auto { "开启" } else { "关闭" }, e);
+            }
+        }
+    }
+    set_status(&tip);
     info!(
-        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={}",
-        interval, warn, critical, notify
+        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）",
+        interval, warn, critical, notify, auto, auto_was
     );
 }
 
