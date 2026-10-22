@@ -24,27 +24,27 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
     GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW,
-    ShowWindow, WNDCLASSW, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, HMENU, HWND_TOP,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
+    ShowWindow, WNDCLASSW, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
     WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_SETFONT, WM_SETTINGCHANGE, WS_BORDER,
     WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
-// 复选框的勾选状态。常量本体在 Win32_UI_Controls 里，为两个整数再开一个 feature 不值
-const BM_GETCHECK: u32 = 240;
-const BM_SETCHECK: u32 = 241;
-const BST_CHECKED: usize = 1;
-const BST_UNCHECKED: usize = 0;
 
 // 按钮和复选框都改成自绘（BS_OWNERDRAW）。
 // 原因：标准按钮在启用视觉样式时根本不理 WM_CTLCOLORBTN 返回的颜色 ——
 // 深色窗口上摆一排浅灰按钮，比不做深色还难看。自绘是唯一能真正控住颜色的路子，
 // 顺带浅色下也比系统经典控件更贴合弹窗的观感。
 // BS_* 常量在 windows crate 里是 i32，跟着它走
+// 按钮样式的**低 4 位是互斥的类型枚举**：BS_PUSHBUTTON=0 / BS_CHECKBOX=2 /
+// BS_AUTOCHECKBOX=3 / BS_OWNERDRAW=0xB ……它们不是可以叠加的标志位。
+// 写过 `BS_AUTOCHECKBOX | BS_OWNERDRAW`，结果 3|0xB 还是 0xB —— 控件只是个自绘按钮，
+// 复选框语义被吃掉，BM_GETCHECK / BM_SETCHECK 全部失效（表现就是「怎么点都勾不上」）。
+// 自绘复选框只能自己维护勾选状态，见 NOTIFY_CHECK / AUTO_CHECK。
 const BS_OWNERDRAW: i32 = 0x000B;
-// 自绘状态位
+// 自绘状态位：ODS_SELECTED = 按钮正被按下。
+// 注意 ODS_CHECKED 只对菜单项有效，别拿它判断按钮的勾选 —— 那是另一个坑
 const ODS_SELECTED: u32 = 0x0001;
-const ODS_CHECKED: u32 = 0x0008;
 // DrawTextW 的排版方式。DT_NOPREFIX 不能省：否则文字里的 & 会被当成快捷键下划线
 const DT_CENTER: u32 = 0x0001;
 const DT_VCENTER: u32 = 0x0004;
@@ -115,6 +115,11 @@ static HW_CRITICAL: AtomicIsize = AtomicIsize::new(0);
 static HW_STATUS: AtomicIsize = AtomicIsize::new(0);
 static HW_NOTIFY: AtomicIsize = AtomicIsize::new(0);
 static HW_AUTO: AtomicIsize = AtomicIsize::new(0);
+/// 两个复选框的勾选状态。**我们自己存**，不问控件 ——
+/// 自绘之后它们不再是复选框（见 BS_OWNERDRAW 那条注释），BM_GETCHECK 是读不到东西的。
+/// 打开窗口时从配置/注册表灌进来，点击时翻转，保存时读走。
+static NOTIFY_CHECK: AtomicBool = AtomicBool::new(true);
+static AUTO_CHECK: AtomicBool = AtomicBool::new(false);
 static HW_THEME: AtomicIsize = AtomicIsize::new(0);
 // WM_CTLCOLOR 要返回一个画刷，而系统在返回之后还要用它 —— 不能每次现造现删。
 // 所以缓存一个，颜色变了才重建（切换主题时 key 变化，旧的被删掉）
@@ -336,7 +341,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let notify = make(
             w!("BUTTON"),
             "低电量时提醒我",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_AUTOCHECKBOX | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             px(MARGIN),
             px(CHECK_Y),
             px(CHECK_W),
@@ -353,7 +358,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let test = make(
             w!("BUTTON"),
             "试一次",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             px(TEST_X),
             px(CHECK_Y),
             px(TEST_W),
@@ -367,7 +372,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let auto = make(
             w!("BUTTON"),
             "开机时自动启动",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_AUTOCHECKBOX | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             px(MARGIN),
             px(CHECK2_Y),
             px(BASE_W - MARGIN * 2.0),
@@ -383,7 +388,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let theme_btn = make(
             w!("BUTTON"),
             &theme::current_mode().label(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             px(MARGIN),
             px(THEME_Y),
             px(BASE_W - MARGIN * 2.0),
@@ -413,7 +418,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let save = make(
             w!("BUTTON"),
             "保存",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_DEFPUSHBUTTON | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             bx,
             px(BTN_Y),
             px(BTN_W),
@@ -424,7 +429,7 @@ pub fn create() -> Result<(), windows::core::Error> {
         let cancel = make(
             w!("BUTTON"),
             "取消",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_PUSHBUTTON | BS_OWNERDRAW) as u32),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             bx + px(BTN_W + BTN_GAP),
             px(BTN_Y),
             px(BTN_W),
@@ -446,12 +451,17 @@ pub fn open() {
         set_text(ctl(&HW_WARN), &cfg.low_warn.to_string());
         set_text(ctl(&HW_CRITICAL), &cfg.low_critical.to_string());
         set_text(ctl(&HW_STATUS), "");
-        set_check(ctl(&HW_NOTIFY), cfg.notify_enabled);
+        NOTIFY_CHECK.store(cfg.notify_enabled, Ordering::SeqCst);
 
         // 自启这一格的勾选状态问注册表，不问 config —— 用户可能在设置之外改过它
         // （任务管理器的「启动」页、或者清理软件删过启动项），config 不知道那些事
         let auto = crate::autostart::is_enabled();
-        set_check(ctl(&HW_AUTO), auto);
+        AUTO_CHECK.store(auto, Ordering::SeqCst);
+        // 这两格的状态现在是我们自己存的，打出来便于核对「显示的勾」和「实际值」是否一致
+        info!(
+            "[settings] 打开：提醒={}（config）自启={}（注册表）",
+            cfg.notify_enabled, auto
+        );
         // 主题按钮的标签里写着「当前深色/浅色」，每次打开都要按此刻的状态重算
         set_text(ctl(&HW_THEME), &theme::current_mode().label());
         if cfg.autostart != auto {
@@ -507,10 +517,11 @@ fn on_save() {
     }
 
     let mut cfg = Config::load();
-    let notify = is_checked(ctl(&HW_NOTIFY));
-    // 打开窗口时没记下这个状态，这里重新问一次注册表：
+    // 两格的勾选状态读我们自己那份（控件已经不认 BM_GETCHECK 了）
+    let notify = NOTIFY_CHECK.load(Ordering::SeqCst);
+    // 打开窗口时只记了一次注册表，这里重新问一遍：
     // 用户在窗口开着的那几十秒里完全可能从任务管理器里改了启动项
-    let auto = is_checked(ctl(&HW_AUTO));
+    let auto = AUTO_CHECK.load(Ordering::SeqCst);
     let auto_was = crate::autostart::is_enabled();
 
     cfg.poll_interval_secs = interval;
@@ -618,9 +629,15 @@ unsafe fn draw_item(dis: &DRAWITEMSTRUCT) {
     let c = theme::colors();
     let hdc = dis.hdc;
     let pressed = dis.item_state & ODS_SELECTED != 0;
-    let checked = dis.item_state & ODS_CHECKED != 0;
     let id = dis.ctl_id as isize;
     let is_check = id == ID_NOTIFY || id == ID_AUTO;
+    // 勾选状态从我们自己那份变量读。
+    // 不能问控件（它不是复选框了），也不能看 itemState（ODS_CHECKED 只对菜单项有效）
+    let checked = if id == ID_NOTIFY {
+        NOTIFY_CHECK.load(Ordering::SeqCst)
+    } else {
+        AUTO_CHECK.load(Ordering::SeqCst)
+    };
 
     // 先把整块填成窗口底色：自绘控件不会自己擦背景，
     // 少了这一步，切换主题或窗口重绘后会留着上一次的痕迹
@@ -668,7 +685,10 @@ unsafe fn draw_item(dis: &DRAWITEMSTRUCT) {
         let fb = CreateSolidBrush(rgb(fill.0, fill.1, fill.2));
         let _ = FillRect(hdc, &dis.rc_item, fb);
         let _ = DeleteObject(HGDIOBJ(fb.0));
-        let bd = CreateSolidBrush(rgb(c.btn_border.0, c.btn_border.1, c.btn_border.2));
+        // 「保存」是主按钮：自绘之后 BS_DEFPUSHBUTTON 的语义没了（那也是个类型位），
+        // 用一圈更醒目的边框把它标出来，别让用户分不清哪个是确定
+        let edge = if id == ID_SAVE { c.win_fg } else { c.btn_border };
+        let bd = CreateSolidBrush(rgb(edge.0, edge.1, edge.2));
         let _ = FrameRect(hdc, &dis.rc_item, bd);
         let _ = DeleteObject(HGDIOBJ(bd.0));
         let mut rc = dis.rc_item;
@@ -705,24 +725,6 @@ fn set_status(text: &str) {
     unsafe {
         let _ = SetWindowTextW(ctl(&HW_STATUS), windows::core::PCWSTR(t.as_ptr()));
     }
-}
-
-fn set_check(hw: HWND, on: bool) {
-    unsafe {
-        let _ = SendMessageW(
-            hw,
-            BM_SETCHECK,
-            Some(WPARAM(if on { BST_CHECKED } else { BST_UNCHECKED })),
-            Some(LPARAM(0)),
-        );
-    }
-}
-
-fn is_checked(hw: HWND) -> bool {
-    let r = unsafe {
-        SendMessageW(hw, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0)))
-    };
-    r.0 == BST_CHECKED as isize
 }
 
 fn text_of(hw: HWND) -> String {
@@ -802,6 +804,24 @@ unsafe extern "system" fn wndproc(
                 // 这里只把「有人点了」这个事实递过去
                 ID_TEST => TEST_REQUESTED.store(true, Ordering::SeqCst),
                 ID_THEME => cycle_theme(),
+                // 自绘复选框的状态得自己翻，翻完还要让控件重画 ——
+                // 系统不会再替我们做这两件事（原因见 BS_OWNERDRAW 那条注释）
+                ID_NOTIFY | ID_AUTO => {
+                    let is_notify = id == ID_NOTIFY;
+                    let cell: &AtomicBool = if is_notify { &NOTIFY_CHECK } else { &AUTO_CHECK };
+                    let on = !cell.load(Ordering::SeqCst);
+                    cell.store(on, Ordering::SeqCst);
+                    let _ = InvalidateRect(
+                        Some(ctl(if is_notify { &HW_NOTIFY } else { &HW_AUTO })),
+                        None,
+                        true,
+                    );
+                    info!(
+                        "[settings] 复选框「{}」现在={}",
+                        if is_notify { "低电量时提醒我" } else { "开机时自动启动" },
+                        on
+                    );
+                }
                 _ => {}
             }
             LRESULT(0)
