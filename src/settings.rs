@@ -78,13 +78,12 @@ const ID_NOTIFY: isize = 1030;
 const ID_TEST: isize = 1040;
 const ID_AUTO: isize = 1050;
 const ID_THEME: isize = 1060;
-const ID_STYLE: isize = 1070;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
 // 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 356.0;
+const BASE_H: f32 = 316.0;
 const MARGIN: f32 = 16.0;
 const ROW_TOP: f32 = 20.0;
 const ROW_PITCH: f32 = 36.0;
@@ -103,10 +102,8 @@ const TEST_X: f32 = MARGIN + CHECK_W + 8.0;
 const CHECK2_Y: f32 = CHECK_Y + 30.0;
 /// 主题切换按钮占整行，挨着自启
 const THEME_Y: f32 = CHECK2_Y + 30.0;
-/// 提醒方式切换按钮，跟主题按钮一样占整行
-const STYLE_Y: f32 = THEME_Y + 34.0;
-const STATUS_Y: f32 = 262.0;
-const BTN_Y: f32 = 306.0;
+const STATUS_Y: f32 = 222.0;
+const BTN_Y: f32 = 266.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 30.0;
 const BTN_GAP: f32 = 16.0;
@@ -124,10 +121,6 @@ static HW_AUTO: AtomicIsize = AtomicIsize::new(0);
 static NOTIFY_CHECK: AtomicBool = AtomicBool::new(true);
 static AUTO_CHECK: AtomicBool = AtomicBool::new(false);
 static HW_THEME: AtomicIsize = AtomicIsize::new(0);
-static HW_STYLE: AtomicIsize = AtomicIsize::new(0);
-/// 提醒方式：true = 系统通知，false = 自绘卡片。
-/// 和复选框一样是**我们自己存**的状态（按钮是自绘的，读不出来）
-static STYLE_TOAST: AtomicBool = AtomicBool::new(false);
 // WM_CTLCOLOR 要返回一个画刷，而系统在返回之后还要用它 —— 不能每次现造现删。
 // 所以缓存一个，颜色变了才重建（切换主题时 key 变化，旧的被删掉）
 static BRUSH_WIN: AtomicIsize = AtomicIsize::new(0);
@@ -179,25 +172,6 @@ pub fn notify_enabled() -> bool {
 
 pub fn set_notify(on: bool) {
     NOTIFY.store(on, Ordering::SeqCst);
-}
-
-/// 提醒走系统通知还是自绘卡片
-pub fn toast_style() -> bool {
-    STYLE_TOAST.load(Ordering::SeqCst)
-}
-
-pub fn set_toast_style(on: bool) {
-    STYLE_TOAST.store(on, Ordering::SeqCst);
-}
-
-/// 「提醒方式」按钮上的文字。两态的区别写进标签里，
-/// 否则用户不知道「卡片」和「系统通知」到底差在哪
-pub fn style_label(toast: bool) -> &'static str {
-    if toast {
-        "提醒方式：系统通知（进通知中心）"
-    } else {
-        "提醒方式：托盘卡片（贴图标）"
-    }
 }
 
 /// 主循环每轮问一次：设置窗口里的「试一次」被点过吗。
@@ -425,20 +399,6 @@ pub fn create() -> Result<(), windows::core::Error> {
         set_font(theme_btn, font);
         HW_THEME.store(theme_btn.0 as isize, Ordering::SeqCst);
 
-        let style_btn = make(
-            w!("BUTTON"),
-            style_label(STYLE_TOAST.load(Ordering::SeqCst)),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
-            px(MARGIN),
-            px(STYLE_Y),
-            px(BASE_W - MARGIN * 2.0),
-            px(BTN_H),
-            wnd,
-            ID_STYLE,
-        );
-        set_font(style_btn, font);
-        HW_STYLE.store(style_btn.0 as isize, Ordering::SeqCst);
-
         let status = make(
             w!("STATIC"),
             "",
@@ -504,12 +464,6 @@ pub fn open() {
         );
         // 主题按钮的标签里写着「当前深色/浅色」，每次打开都要按此刻的状态重算
         set_text(ctl(&HW_THEME), &theme::current_mode().label());
-        // 提醒方式：窗口里那份和运行时那份要同时设，
-        // 「试一次」按钮是在保存之前就能用的，它读的是运行时那份
-        let toast = cfg.notify_style == "toast";
-        STYLE_TOAST.store(toast, Ordering::SeqCst);
-        set_toast_style(toast);
-        set_text(ctl(&HW_STYLE), style_label(toast));
         if cfg.autostart != auto {
             info!(
                 "[settings] 自启意图（config）={} 但注册表实际={}，按注册表显示",
@@ -574,11 +528,6 @@ fn on_save() {
     cfg.low_warn = warn;
     cfg.low_critical = critical;
     cfg.notify_enabled = notify;
-    cfg.notify_style = if STYLE_TOAST.load(Ordering::SeqCst) {
-        "toast".into()
-    } else {
-        "card".into()
-    };
     cfg.autostart = auto;
     // 主题是点了就生效的，保存时把此刻的模式记下来就行
     cfg.theme = theme::current_mode().as_str().to_string();
@@ -616,15 +565,8 @@ fn on_save() {
     }
     set_status(&tip);
     info!(
-        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={}（{}）自启={}（原 {}）主题={}",
-        interval,
-        warn,
-        critical,
-        notify,
-        cfg.notify_style,
-        auto,
-        auto_was,
-        cfg.theme
+        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）主题={}",
+        interval, warn, critical, notify, auto, auto_was, cfg.theme
     );
 }
 
@@ -778,22 +720,6 @@ fn cycle_theme() {
     info!("[settings] 主题切到 {}（深色={}）", next.as_str(), theme::is_dark());
 }
 
-/// 提醒方式按钮被点：两态互换并立刻生效（下次提醒就按新方式走）。
-/// 选到系统通知但它其实不可用时，直接在状态栏说清楚 ——
-/// 不然用户切过去、等不到通知，只会以为按钮坏了
-fn cycle_style() {
-    let toast = !STYLE_TOAST.load(Ordering::SeqCst);
-    STYLE_TOAST.store(toast, Ordering::SeqCst);
-    set_toast_style(toast);
-    set_text(ctl(&HW_STYLE), style_label(toast));
-    if toast && !crate::notify::available() {
-        set_status("系统通知当前不可用（原因见日志），提醒会退回托盘卡片");
-    } else {
-        set_status("");
-    }
-    info!("[settings] 提醒方式切到 {}", if toast { "系统通知" } else { "托盘卡片" });
-}
-
 fn set_status(text: &str) {
     let t = wide_nul(text);
     unsafe {
@@ -878,7 +804,6 @@ unsafe extern "system" fn wndproc(
                 // 这里只把「有人点了」这个事实递过去
                 ID_TEST => TEST_REQUESTED.store(true, Ordering::SeqCst),
                 ID_THEME => cycle_theme(),
-                ID_STYLE => cycle_style(),
                 // 自绘复选框的状态得自己翻，翻完还要让控件重画 ——
                 // 系统不会再替我们做这两件事（原因见 BS_OWNERDRAW 那条注释）
                 ID_NOTIFY | ID_AUTO => {
