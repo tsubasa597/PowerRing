@@ -10,15 +10,19 @@ use hidapi::HidApi;
 
 use crate::hidpp::{Battery, BatteryKind, Hidpp};
 use crate::profile::{Profile, Protocol, Transport};
+use crate::raw::RawDev;
 
-/// 一条实际链路。目前只有 HID++；后续加 HyperX / 蓝牙时在这里扩展即可。
-/// feature 与 kind 都来自声明 —— 读什么、怎么解读，不再由代码硬编码。
+/// 一条实际链路。feature / kind / 报文格式都来自声明 ——
+/// 读什么、怎么解读，不再由代码硬编码。
 enum Link {
     Hidpp {
         conn: Arc<Hidpp>,
         dev_idx: u8,
         feature: u16,
         kind: BatteryKind,
+    },
+    Raw {
+        dev: Arc<RawDev>,
     },
 }
 
@@ -35,6 +39,7 @@ impl Device {
                 BatteryKind::Voltage => conn.battery_voltage(*dev_idx, *feature),
                 BatteryKind::Percent => conn.battery_percent(*dev_idx, *feature),
             },
+            Link::Raw { dev } => dev.battery(),
         }
     }
 }
@@ -43,6 +48,8 @@ impl Device {
 pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
     // 同一个 HID 接口可能被多份声明引用（一个接收器上挂着多台设备），只打开一次
     let mut opened: HashMap<String, Arc<Hidpp>> = HashMap::new();
+    // raw 设备按「接口 + 声明」缓存：一份声明对应一种报文格式，不能共用
+    let mut raws: HashMap<String, Arc<RawDev>> = HashMap::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Device> = Vec::new();
 
@@ -63,24 +70,69 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
             }
 
             let key = info.path().to_string_lossy().to_string();
-            let conn = match opened.get(&key) {
-                Some(c) => c.clone(),
-                None => {
-                    let Ok(dev) = info.open_device(api) else {
-                        continue;
-                    };
-                    let conn = Arc::new(Hidpp::new(dev));
-                    opened.insert(key.clone(), conn.clone());
-                    conn
-                }
-            };
 
             match prof.protocol {
-                Protocol::Hidpp20 => scan_hidpp(&conn, prof, &key, &mut seen, &mut out),
+                Protocol::Hidpp20 => {
+                    let conn = match opened.get(&key) {
+                        Some(c) => c.clone(),
+                        None => {
+                            let Ok(dev) = info.open_device(api) else {
+                                continue;
+                            };
+                            let conn = Arc::new(Hidpp::new(dev));
+                            opened.insert(key.clone(), conn.clone());
+                            conn
+                        }
+                    };
+                    scan_hidpp(&conn, prof, &key, &mut seen, &mut out);
+                }
+                Protocol::Raw => {
+                    let Some(spec) = prof.raw.clone() else {
+                        continue;
+                    };
+                    let rkey = format!("{key}#{}", prof.name);
+                    let dev = match raws.get(&rkey) {
+                        Some(d) => d.clone(),
+                        None => {
+                            let Ok(h) = info.open_device(api) else {
+                                continue;
+                            };
+                            let d = Arc::new(RawDev::new(h, spec));
+                            raws.insert(rkey.clone(), d.clone());
+                            d
+                        }
+                    };
+                    scan_raw(&dev, prof, &rkey, &mut seen, &mut out);
+                }
             }
         }
     }
     out
+}
+
+/// raw 设备的扫描：**能读到一条有效响应才算它在**。
+///
+/// 只比对 VID/PID 是不够的 —— 无线接收器是插在机器上的，耳机开机与否
+/// 枚举结果完全一样。靠一次探测请求区分：耳机没开就没有响应，
+/// 于是它自然从列表里消失，而不是显示一个假的 0%。
+fn scan_raw(
+    dev: &Arc<RawDev>,
+    prof: &Profile,
+    key: &str,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<Device>,
+) {
+    // 探测失败**不**记进 seen：这一轮没开机，下一轮还可能开机，别把它永久划掉
+    if !dev.probe() {
+        return;
+    }
+    if !seen.insert(key.to_string()) {
+        return;
+    }
+    out.push(Device {
+        name: prof.name.clone(),
+        link: Link::Raw { dev: dev.clone() },
+    });
 }
 
 fn scan_hidpp(

@@ -19,6 +19,11 @@ use crate::hidpp::BatteryKind;
 pub enum Protocol {
     /// 罗技 HID++ 2.0
     Hidpp20,
+    /// 原始报文：请求/响应都是裸字节，格式全写在声明里。
+    /// 为非 HID++ 的设备（HyperX、雷蛇等）准备 —— 它们的报文各家自定义，
+    /// 与其每加一家就写一份 Rust，不如把「发什么、读哪几个字节、怎么换算」
+    /// 都变成声明里的字段
+    Raw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +46,8 @@ pub struct Profile {
     pub usage: Option<u16>,
     pub battery_feature: Option<u16>,
     pub battery_kind: BatteryKind,
+    /// protocol: raw 时的报文规格
+    pub raw: Option<RawSpec>,
     /// Receiver 模式下要探测的 slot 列表
     pub slots: Vec<u8>,
     /// 设备名 feature（用于识别与显示）
@@ -89,6 +96,59 @@ struct RawBattery {
     feature: Option<String>,
     #[serde(default)]
     kind: String,
+    // 以下仅 protocol: raw 用到
+    #[serde(default)]
+    request: Option<String>,
+    #[serde(default)]
+    reply_len: Option<usize>,
+    #[serde(default)]
+    state_index: Option<usize>,
+    #[serde(default)]
+    value_index: Option<usize>,
+    #[serde(default)]
+    charging_states: Option<Vec<String>>,
+    /// 档位 → 分段表。key 是档位字节（如 "0x0E"），value 是 [[上界, 百分比], ...]
+    #[serde(default)]
+    table: Option<std::collections::HashMap<String, Vec<(u8, u8)>>>,
+}
+
+impl RawBattery {
+    fn compile_spec(&self) -> Result<RawSpec, String> {
+        let request = self
+            .request
+            .as_deref()
+            .and_then(hex_bytes)
+            .ok_or("raw 协议缺少 battery.request（如 \"21 FF 05\"）")?;
+        let value_index = self
+            .value_index
+            .ok_or("raw 协议缺少 battery.value_index（数值字节的下标）")?;
+        let mut table: Vec<(u8, Vec<(u8, u8)>)> = Vec::new();
+        if let Some(t) = &self.table {
+            for (k, rows) in t {
+                let state = hex_byte(k).ok_or(format!("table 的档位键 {k} 不是合法十六进制"))?;
+                if rows.is_empty() {
+                    return Err(format!("table[{k}] 是空的"));
+                }
+                table.push((state, rows.clone()));
+            }
+            // 查表是顺序扫描，排序后可以让声明里的书写顺序不影响结果
+            table.sort_by_key(|(s, _)| *s);
+        }
+        Ok(RawSpec {
+            reply_len: self.reply_len.unwrap_or(20).max(request.len()),
+            request,
+            state_index: self.state_index.unwrap_or(value_index.saturating_sub(1)),
+            value_index,
+            charging_states: self
+                .charging_states
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| hex_byte(s).ok_or(format!("charging_states 里的 {s} 不是合法十六进制")))
+                .collect::<Result<Vec<u8>, String>>()?,
+            table,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +159,26 @@ struct RawIdentify {
     contains: Option<String>,
 }
 
+/// protocol: raw 的报文规格。字段全部来自声明，代码里不出现任何厂商常量
+#[derive(Debug, Clone)]
+pub struct RawSpec {
+    /// 请求报文（首字节是 report id），会补 0 到 reply_len 的长度
+    pub request: Vec<u8>,
+    /// 期望的响应长度。发请求时报文也按这个长度补齐 —— 很多设备对
+    /// 长度敏感，短了干脆不回（罗技那边踩过同样的坑）
+    pub reply_len: usize,
+    /// 响应里「档位」字节的下标。有些设备分成几档，每档的数值含义不同
+    pub state_index: usize,
+    /// 响应里「数值」字节的下标
+    pub value_index: usize,
+    /// 档位字节取这些值时表示正在充电
+    pub charging_states: Vec<u8>,
+    /// 分段映射表：每个档位一串 (数值上界, 百分比)，
+    /// 数值落在第一个「不超过上界」的区间里就取那个百分比。
+    /// 用分段而不是公式 —— 实测这些设备的数值与百分比不是线性关系
+    pub table: Vec<(u8, Vec<(u8, u8)>)>,
+}
+
 /// 解析 "0x046D" / "046D" 这类写法
 fn hex(s: &str) -> Option<u16> {
     let t = s.trim().to_ascii_lowercase();
@@ -106,11 +186,32 @@ fn hex(s: &str) -> Option<u16> {
     u16::from_str_radix(t, 16).ok()
 }
 
+/// 解析单个字节 "0x0E" / "0E" / "231"
+fn hex_byte(s: &str) -> Option<u8> {
+    let t = s.trim().to_ascii_lowercase();
+    let t = t.strip_prefix("0x").unwrap_or(&t);
+    u8::from_str_radix(t, 16).ok()
+}
+
+/// 解析 "21 FF 05" 这样的空格分隔字节序列
+fn hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let out: Option<Vec<u8>> = s.split_whitespace().map(hex_byte).collect();
+    out.filter(|v| !v.is_empty())
+}
+
 impl Raw {
     fn compile(self) -> Result<Profile, String> {
         let protocol = match self.protocol.trim().to_ascii_lowercase().as_str() {
             "" | "hid++2.0" | "hidpp20" | "hidpp" => Protocol::Hidpp20,
+            "raw" | "raw_report" => Protocol::Raw,
             other => return Err(format!("不支持的协议 {other}")),
+        };
+        // raw 协议的报文规格是必填的：没有请求字节就无从下手，
+        // 与其让它带着空表跑起来再读出 0%，不如在加载时就说清楚
+        let raw = if protocol == Protocol::Raw {
+            Some(self.battery.compile_spec()?)
+        } else {
+            None
         };
         let transport = match self.transport.trim().to_ascii_lowercase().as_str() {
             "" | "receiver" => Transport::Receiver,
@@ -147,6 +248,7 @@ impl Raw {
             usage: self.matches.usage.as_deref().and_then(hex),
             battery_feature: self.battery.feature.as_deref().and_then(hex),
             battery_kind,
+            raw,
             slots,
             name_feature,
             identify_contains: ident.contains,

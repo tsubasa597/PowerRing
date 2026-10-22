@@ -24,12 +24,13 @@ mod settings;
 mod theme;
 mod ui;
 mod profile;
+mod raw;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hidapi::HidApi;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -333,7 +334,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             /// 两档提醒各自的弹药
             arm_critical: Arm,
             arm_warn: Arm,
+            /// 连续读不到的次数。到上限就移出列表 ——
+            /// 无线耳机一关机就读不到了，让它继续挂着上一次的电量是在骗人
+            misses: u8,
         }
+
+        /// 连续读不到几次就把设备移出列表。
+        /// 取 3 而不是 1：GPW 偶尔单轮读失败，一次失败就删设备会让列表闪烁
+        const MISS_LIMIT: u8 = 3;
+        /// 隔多久重新扫一遍总线。无线设备随时可能开机，
+        /// 只在「一台都没扫到」时重扫是不够的 —— 已经有一台时，后开机的那台永远进不来
+        const RESCAN_EVERY: Duration = Duration::from_secs(60);
 
         /// 判断这台设备是不是刚跌破阈值，并把弹药状态推进一轮。
         ///
@@ -419,8 +430,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 charging: false,
                 arm_critical: Arm::Armed,
                 arm_warn: Arm::Armed,
+                misses: 0,
             })
             .collect();
+        let mut last_scan = Instant::now();
 
         loop {
             // 首轮没扫到不代表没有设备：实测上一进程被强杀后，接收器会有几秒不响应。
@@ -439,8 +452,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             charging: false,
                             arm_critical: Arm::Armed,
                             arm_warn: Arm::Armed,
+                            misses: 0,
                         })
                         .collect();
+                }
+                last_scan = Instant::now();
+            } else if last_scan.elapsed() >= RESCAN_EVERY {
+                // 定期重扫是为了接住「中途开机」的设备：接收器一直插着，
+                // 但只有耳机开了才会回应，不重扫就永远发现不了它
+                last_scan = Instant::now();
+                for d in device::scan(&api, &profiles) {
+                    if watched.iter().any(|w| w.dev.name == d.name) {
+                        continue;
+                    }
+                    info!("[scan] 发现新设备：{}", d.name);
+                    watched.push(Watched {
+                        dev: d,
+                        percent: None,
+                        charging: false,
+                        arm_critical: Arm::Armed,
+                        arm_warn: Arm::Armed,
+                        misses: 0,
+                    });
                 }
             }
 
@@ -448,6 +481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for w in watched.iter_mut() {
                 match w.dev.read() {
                     Some(b) => {
+                        w.misses = 0;
                         // 是不是这台设备的第一次读数：弹药的初始状态由它决定
                         let fresh = w.percent.is_none();
                         if w.percent.map(|p| p != b.percent).unwrap_or(true) {
@@ -460,8 +494,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
-                    None => warn!("[battery] {} 读取失败，保留上次读数", w.dev.name),
+                    None => {
+                        w.misses = w.misses.saturating_add(1);
+                        warn!(
+                            "[battery] {} 读取失败（连续 {} 次），保留上次读数",
+                            w.dev.name, w.misses
+                        );
+                    }
                 }
+            }
+            // 连续读不到的设备移出列表：关机了的耳机不该一直占着一行旧电量。
+            // 保留 3 次容错，避免偶尔一次读失败就让列表闪一下
+            let before = watched.len();
+            watched.retain(|w| w.misses < MISS_LIMIT);
+            if watched.len() != before {
+                info!(
+                    "[scan] {} 台设备连续读不到，已移出列表",
+                    before - watched.len()
+                );
             }
             let snap = watched
                 .iter()
