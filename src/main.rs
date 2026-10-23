@@ -551,6 +551,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     before - watched.len()
                 );
             }
+
+            // 「彻底没了」的设备立即移出，不必攒够三次。
+            // 三次容错是给「暂时读不到」留的余地 —— 实测过 HID 设备会因为
+            // USB 重枚举在十秒内连着失败三次，缩短重试或去掉容错都会误伤（2026-10-23）。
+            // 而「连设备对象都构造不出来」是另一种性质的证据，不需要那么多耐心。
+            //
+            // 移出后把重扫计时拨到期：万一它只是闪断（比如蓝牙重连的一瞬间），
+            // 下一轮就能重扫并把它找回来，不会白等一分钟。
+            let before_gone = watched.len();
+            watched.retain(|w| !w.dev.gone());
+            if watched.len() != before_gone {
+                info!(
+                    "[scan] {} 台设备已从系统消失，立即移出列表",
+                    before_gone - watched.len()
+                );
+                last_scan = Instant::now() - RESCAN_EVERY;
+            }
             let snap = watched
                 .iter()
                 .map(|w| Status {

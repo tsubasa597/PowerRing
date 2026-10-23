@@ -114,6 +114,16 @@ fn hex16(s: &str) -> Option<u16> {
     u16::from_str_radix(s, 16).ok()
 }
 
+/// 一台蓝牙设备此刻在不在
+pub enum Presence {
+    /// 连着，可以读
+    Connected,
+    /// 系统里还在（多半是配对过），但没连上
+    Disconnected,
+    /// 系统里已经没有这台了 —— 连设备对象都构造不出来
+    Gone,
+}
+
 /// 一个已经打开的电池通道。持有它就不用每轮重新发现一次 GATT
 pub struct Dev {
     /// 设备接口路径。查连接状态时要用，所以留在手上
@@ -155,7 +165,7 @@ impl Dev {
     /// 光看「读没读到」根本分不出它在不在（详见模块头注释），所以这里额外看一眼
     /// 连接状态，交给上层用「连续几次读不到」的既有机制把它请出列表。
     pub fn battery(&self) -> Option<Battery> {
-        if !self.connected() {
+        if !matches!(self.presence(), Presence::Connected) {
             return None;
         }
         let percent = self.raw()?;
@@ -166,30 +176,40 @@ impl Dev {
         })
     }
 
-    /// 扫描时用：既要读得到值，也要设备在线。两条挨在一起讲清楚它们的分工 ——
-    /// `raw()` 只能证明「缓存里有个数」，`connected()` 才能证明「这台设备还在这儿」
-    pub fn probe(&self) -> bool {
-        self.connected() && self.raw().is_some()
+    /// 这台设备是不是已经**从系统里彻底消失了**。
+    ///
+    /// 比「读不到」强得多：GATT 缓存会给早已消失的设备继续报值，
+    /// `ConnectionStatus` 也只是说明那一刻没连上（BLE 空闲挂起也会这样），
+    /// 唯独这个是硬证据 —— 上层可以据此**立即**把设备请出列表，不必再等容错。
+    pub fn gone(&self) -> bool {
+        matches!(self.presence(), Presence::Gone)
     }
 
-    /// 设备的蓝牙连接是不是还连着。
-    ///
-    /// 上下两半都验证过了：在线的手柄是 `Connected`，关机的手柄和放在公司
-    /// 的键盘都是 `Disconnected`。它能回答「这台设备在不在这儿」这个问题，
-    /// 而「读得到值」回答不了 —— 缓存会替已经消失的设备继续给答案。
-    fn connected(&self) -> bool {
+    /// 扫描时用：既要读得到值，也要设备在线。两条挨在一起讲清楚它们的分工 ——
+    /// `raw()` 只能证明「缓存里有个数」，`presence()` 才能证明「这台设备还连着」
+    pub fn probe(&self) -> bool {
+        matches!(self.presence(), Presence::Connected) && self.raw().is_some()
+    }
+
+    /// 设备此刻在不在。做成三态而不是布尔值，是因为「下线」和「彻底没了」
+    /// 值得区别对待：前者可能只是 BLE 空闲挂起，还算不上证据；
+    /// 后者是「系统里已经没有这台设备」，可以立即下结论。
+    fn presence(&self) -> Presence {
         let Ok(op) = BluetoothLEDevice::FromIdAsync(&windows::core::HSTRING::from(&self.id)) else {
             warn!("[ble] 建 BluetoothLEDevice 失败，按在线处理");
-            return true;
+            return Presence::Connected;
         };
         match op.get() {
             Ok(dev) => match dev.ConnectionStatus() {
                 // 不记 normal 情况：轮询每几秒一次，正常情况的日志会把滚动日志冲干净，
                 // 而「设备离线」这件事上层本来就有「读取失败」的日志在讲
-                Ok(s) => s == BluetoothConnectionStatus::Connected,
+                Ok(s) => match s == BluetoothConnectionStatus::Connected {
+                    true => Presence::Connected,
+                    false => Presence::Disconnected,
+                },
                 Err(e) => {
                     warn!("[ble] 取连接状态失败 {e}，按在线处理");
-                    true
+                    Presence::Connected
                 }
             },
             Err(e) => {
@@ -199,13 +219,18 @@ impl Dev {
                 // 设备已经从系统里消失了，连 GATT 服务都不再枚举得到。
                 // 2026-10-23 就踩过：手柄手动关机后只剩这一个信号，当时一律按在线
                 // 兜底，结果它攥着缓存里的 86% 永远不消失。
-                // 所以按 HRESULT 区分：S_OK + Err = 没有这台设备 → 离线；
+                // 用不存在的蓝牙 id 喂同一个 API 验证过：拿回来的正是同一个
+                // `HRESULT(0x00000000) / 操作成功完成。`。
+                //
+                // 所以按 HRESULT 区分：S_OK + Err = 这台设备没了；
                 // 真正的调用失败（HRESULT 非 0）才保守按在线，交给上层三次容错兜底。
-                if e.code().is_ok() {
-                    return false;
+                match e.code().is_ok() {
+                    true => Presence::Gone,
+                    false => {
+                        warn!("[ble] FromIdAsync 失败 {e}，按在线处理");
+                        Presence::Connected
+                    }
                 }
-                warn!("[ble] FromIdAsync 失败 {e}，按在线处理");
-                true
             }
         }
     }

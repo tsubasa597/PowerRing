@@ -56,6 +56,18 @@ impl Device {
             Link::Ble { dev } => dev.battery(),
         }
     }
+
+    /// 这台设备是不是已经**从系统里彻底消失了**。
+    ///
+    /// 只有蓝牙设备答得上来。HID 设备分不清「拔掉了」和「这一下没响应」
+    /// （接收器插着的时候枚举结果完全一样），一律按「还在」处理，
+    /// 继续交给上层那种慢一拍但稳妥的连续失败计数。
+    pub fn gone(&self) -> bool {
+        match &self.link {
+            Link::Ble { dev } => dev.gone(),
+            Link::Hidpp { .. } | Link::Raw { .. } => false,
+        }
+    }
 }
 
 /// 按声明扫描本机所有受支持设备
