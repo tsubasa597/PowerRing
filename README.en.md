@@ -158,8 +158,7 @@ Output: `target/release/powerring.exe` (~0.9 MB).
 - **Bluetooth devices are supported, with a caveat**: they must expose the standard Battery Service (controllers, some keyboards). Anything on a vendor-proprietary protocol such as AirPods is out — Windows already surfaces those anyway
 - Xbox controllers are readable **only over Bluetooth**: USB cable never routes through GATT and the wireless adapter speaks Microsoft's proprietary GIP
 - Bluetooth Battery Level carries a single percentage byte with **no charging flag**, so these devices never show as charging
-- **Bluetooth readings are the last value Windows synced, not a live one**: they come through the WinRT GATT cache and Windows decides when to refresh (a few minutes apart in practice). The upside is that it is literally the number the Bluetooth settings page shows, so two apps never disagree
-- Following from that: **paired devices that are no longer around keep being enumerated and keep reporting their last known value**, same for powered-off devices. They stay in the list showing a stale percentage. That is the cost of riding on the system's state — noticeable if you have a drawer full of once-paired peripherals
+- **Bluetooth devices enter and leave the list by whether they are connected right now**: drop the link and they fall off, reconnect and they come back. A powered-off controller no longer sits in the tray forever. When a live read fails we fall back to the system cache (possibly stale) rather than dropping a device that is in use
 - When a reading fails the ring turns grey instead of guessing
 
 ## License boundary

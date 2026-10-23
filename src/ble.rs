@@ -11,26 +11,31 @@
 //! WinRT 异步一律用 `get()` 同步等结果：轮询线程每几分钟才调一次，
 //! 为它引入一套异步运行时不值得，阻塞等待反而让出错路径简单得多。
 //!
-//! ## 为什么读缓存，而不是实时
+//! ## 两种读法，先实时后缓存
 //!
-//! WinRT 有两种读法：`ReadValueAsync()` 走缓存，
-//! `ReadValueWithCacheModeAsync(Uncached)` 会真的往设备发一次 GATT 读请求。
-//! 直觉上后者更准，实测却不是这么回事 —— 本机两台设备上 Uncached 一律返回
-//! `Unreachable`，包括那台肯定在线的设备。Windows 不替桌面进程维持这些设备的
-//! GATT 会话，硬读只会读不到。
+//! WinRT 给的 `ReadValueWithCacheModeAsync` 有两种模式：
+//!   `Uncached` —— 真的往设备发一次 GATT 读请求，拿到当下这个值
+//!   `Cached`   —— 取系统缓存里那份，可能是几分钟前同步的
 //!
-//! 于是读缓存，而这么选还有个额外的好处：**我们读到的值与 Windows 蓝牙设置里
-//! 显示的是同一个**（2026-10-23 交叉对照，两边同为 12%），用户不会看到两个软件
-//! 各说各话。代价是刷新节奏由系统掌握，实测几分钟一次。
+//! 所以取值策略是**先实时、读不到再回落到缓存**。实时读实测十几毫秒（首次
+//! 建立连接约 80 ms），一分钟一次完全负担得起；而设备正连着时它总是成功。
 //!
-//! 副作用要清楚：系统会长期留着已配对设备的最后读数，哪怕那台设备已经关机、
-//! 甚至早就不在身边。本机就有一台放在公司的键盘，长年能枚举到、能读出 100%。
-//! 这是 Windows 的行为，本项目选择跟随，并在 `devices/xbox_controller.yaml` 的
-//! notes 里写明了。
+//! 曾经在注释里写过「Uncached 不可用」，那是错的，错得很有代表性：当时试的
+//! 两台设备**恰好都不在线**（一台正在关机、一台远在公司），全阴性样本使得
+//! 「全都返回 Unreachable」看起来像「这条路根本不通」。后来有在线设备可对照，
+//! 同一个 API 立刻就读出了 91%。**判 API 是否可行之前，先确认手上有能成功的样本。**
+//!
+//! ## 在线判定：缓存会留住已经不在的设备
+//!
+//! 缓存的另一个副作用更要紧：系统会长期留着已配对设备的最后读数，哪怕那台设备
+//! 已经关机、甚至早就不在身边（本机有一台放在公司的键盘，长年能枚举到、能读出
+//! 100%）。于是「读得到」不再等于「它在」，得额外看一眼蓝牙连接状态。
+//! `connected()` 干的就是这件事，上下两半都验证过了：在线的设备是 Connected，
+//! 不在的是 Disconnected。
 
 use windows::core::GUID;
 use windows::Devices::Bluetooth::{
-    BluetoothConnectionStatus, BluetoothLEDevice, GenericAttributeProfile as GP,
+    BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice, GenericAttributeProfile as GP,
 };
 use windows::Devices::Enumeration::DeviceInformation;
 use windows::Storage::Streams::DataReader;
@@ -169,11 +174,9 @@ impl Dev {
 
     /// 设备的蓝牙连接是不是还连着。
     ///
-    /// ⚠️ **这里的验证是不对称的，改之前先看清楚**：
-    ///   离线的一半验证过了 —— 关机充电的手柄、放在公司的键盘，都是 Disconnected，
-    ///   判对了。在线的一半还没验 —— 因为手上暂时没有在线的蓝牙设备可对照。
-    /// 如果哪天发现「正在用的设备莫名消失」，第一个嫌疑就是这个函数返回了 false，
-    ///   先看这里的日志，别急着怀疑上面的轮询逻辑。
+    /// 上下两半都验证过了：在线的手柄是 `Connected`，关机的手柄和放在公司
+    /// 的键盘都是 `Disconnected`。它能回答「这台设备在不在这儿」这个问题，
+    /// 而「读得到值」回答不了 —— 缓存会替已经消失的设备继续给答案。
     ///
     /// 取不到状态时按在线算（返回 true）：宁可多显示一台，也别因为一次 API
     /// 抽风把正在用的设备从托盘里摘掉。真正离线的设备会**连续**失败，上层
@@ -203,9 +206,14 @@ impl Dev {
     }
 
     fn raw(&self) -> Option<u8> {
-        // 有意不用 Uncached：实测在本机两台设备上都返回 Unreachable，
-        // 见模块头注释。这里读到的就是 Windows 自己在用的那个值
-        let r = self.ch.ReadValueAsync().ok()?.get().ok()?;
+        // 先真去设备上读一次；连不上（比如它刚好溜去休眠了）就退回系统缓存里
+        // 那个值 —— 陈旧，但比让设备凭空消失好
+        self.read(BluetoothCacheMode::Uncached)
+            .or_else(|| self.read(BluetoothCacheMode::Cached))
+    }
+
+    fn read(&self, mode: BluetoothCacheMode) -> Option<u8> {
+        let r = self.ch.ReadValueWithCacheModeAsync(mode).ok()?.get().ok()?;
         if r.Status().ok()? != GP::GattCommunicationStatus::Success {
             return None;
         }
