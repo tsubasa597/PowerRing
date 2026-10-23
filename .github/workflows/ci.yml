@@ -14,7 +14,7 @@ jobs:
     name: Build and test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # 本项目是 Windows 专属且依赖 Win32 API，默认工具链的 MSVC target 正合适
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "powerring.exe = $mb MB"
 
       - name: 上传产物
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: powerring-windows-x64
           path: |
