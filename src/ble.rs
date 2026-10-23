@@ -177,10 +177,6 @@ impl Dev {
     /// 上下两半都验证过了：在线的手柄是 `Connected`，关机的手柄和放在公司
     /// 的键盘都是 `Disconnected`。它能回答「这台设备在不在这儿」这个问题，
     /// 而「读得到值」回答不了 —— 缓存会替已经消失的设备继续给答案。
-    ///
-    /// 取不到状态时按在线算（返回 true）：宁可多显示一台，也别因为一次 API
-    /// 抽风把正在用的设备从托盘里摘掉。真正离线的设备会**连续**失败，上层
-    /// 有三次容错，一次误判不会被放大成"设备消失"。
     fn connected(&self) -> bool {
         let Ok(op) = BluetoothLEDevice::FromIdAsync(&windows::core::HSTRING::from(&self.id)) else {
             warn!("[ble] 建 BluetoothLEDevice 失败，按在线处理");
@@ -196,9 +192,18 @@ impl Dev {
                     true
                 }
             },
-            // FromIdAsync 本身失败多半是设备已不在，但也有概率是系统忙。
-            // 这里保守按在线处理，交给上层的连续失败计数兜底
             Err(e) => {
+                // ⚠️ WinRT 有个很会骗人的地方：**查无此设备时 `FromIdAsync` 会以
+                // S_OK 的姿态交付一个空对象**，绑定层把它翻成 Err，于是看起来像
+                // 「调用失败」而 HRESULT 却是 0。事实上这正是最该判离线的情形 ——
+                // 设备已经从系统里消失了，连 GATT 服务都不再枚举得到。
+                // 2026-10-23 就踩过：手柄手动关机后只剩这一个信号，当时一律按在线
+                // 兜底，结果它攥着缓存里的 86% 永远不消失。
+                // 所以按 HRESULT 区分：S_OK + Err = 没有这台设备 → 离线；
+                // 真正的调用失败（HRESULT 非 0）才保守按在线，交给上层三次容错兜底。
+                if e.code().is_ok() {
+                    return false;
+                }
                 warn!("[ble] FromIdAsync 失败 {e}，按在线处理");
                 true
             }
