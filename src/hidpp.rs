@@ -108,7 +108,14 @@ impl Hidpp {
     /// 注意：不能用 ping 判断 slot 是否有设备（M0 实测不可靠），改用 feature 查询。
     pub fn feature_index(&self, dev_idx: u8, feature: u16) -> Option<u8> {
         let r = self.request(
-            &[0x11, dev_idx, 0x00, 0x0D, (feature >> 8) as u8, (feature & 0xFF) as u8],
+            &[
+                0x11,
+                dev_idx,
+                0x00,
+                0x0D,
+                (feature >> 8) as u8,
+                (feature & 0xFF) as u8,
+            ],
             300,
         )?;
         if r.len() > 4 && r[0] == 0x11 && r[3] == 0x0D && r[4] != 0 {
@@ -154,7 +161,7 @@ impl Hidpp {
                 p
             })?;
             let take = (len - off).min(15);
-            name.extend_from_slice(&r.get(5..5 + take)?);
+            name.extend_from_slice(r.get(5..5 + take)?);
             off += take;
         }
         Some(Self::text(&name))

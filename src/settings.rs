@@ -9,27 +9,25 @@
 //! 不认 config —— 用户可能在任务管理器里禁掉过它，那份开关 config 看不到。
 
 use crate::config::Config;
+use crate::info;
 use crate::theme::{self, Colors};
 use crate::ui::{create_font, font_px as ui_font_px, px, rgb};
-use crate::info;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, FrameRect, LineTo, MoveToEx,
-    InvalidateRect, SelectObject, SetBkColor, SetBkMode, SetTextColor, DRAW_TEXT_FORMAT, HBRUSH,
+    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, FrameRect, InvalidateRect,
+    LineTo, MoveToEx, SelectObject, SetBkColor, SetBkMode, SetTextColor, DRAW_TEXT_FORMAT, HBRUSH,
     HDC, HGDIOBJ, PEN_STYLE, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
-    GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW,
-    ShowWindow, WNDCLASSW, HMENU, HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_SETFONT, WM_SETTINGCHANGE, WS_BORDER,
-    WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow, HMENU,
+    HWND_TOP, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_SETFONT, WM_SETTINGCHANGE,
+    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
-
 
 // 按钮和复选框都改成自绘（BS_OWNERDRAW）。
 // 原因：标准按钮在启用视觉样式时根本不理 WM_CTLCOLORBTN 返回的颜色 ——
@@ -54,6 +52,9 @@ const DT_NOPREFIX: u32 = 0x0800;
 /// WM_DRAWITEM 带过来的绘制描述。
 /// windows crate 把它放在 Win32_UI_Controls 里，为这一个结构去开那个大 feature 不值；
 /// 它是 Win32 公开的 ABI 结构，自己按同样布局声明一份是安全的
+// 名字沿用 Win32 的原名，方便对着官方文档查字段；缩写全大写是 Windows 的写法，
+// 不是本项目的命名风格
+#[allow(clippy::upper_case_acronyms)]
 #[repr(C)]
 struct DRAWITEMSTRUCT {
     _ctl_type: u32,
@@ -180,7 +181,6 @@ pub fn take_test_request() -> bool {
     TEST_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
-
 /// 普通窗口样式，**不带 WS_EX_TOOLWINDOW**。
 ///
 /// 工具窗口样式是给浮动工具栏/调色板用的：它的标题栏是矮的，
@@ -209,7 +209,6 @@ fn outer_size() -> (i32, i32) {
     }
     (r.right - r.left, r.bottom - r.top)
 }
-
 
 /// 把客户区撑到设计尺寸。
 ///
@@ -483,7 +482,10 @@ pub fn open() {
         let _ = ShowWindow(hwnd(), SW_SHOW);
         // 先显示再校准：客户区只有窗口真实存在后才量得准
         fit_client();
-        info!("[settings] 打开设置窗口，位置=({},{}) 外框={}x{}", x, y, w, h);
+        info!(
+            "[settings] 打开设置窗口，位置=({},{}) 外框={}x{}",
+            x, y, w, h
+        );
     }
 }
 
@@ -617,7 +619,12 @@ unsafe fn draw_check(hdc: HDC, rc: &RECT, c: &Colors) {
         rgb(c.win_fg.0, c.win_fg.1, c.win_fg.2),
     );
     let old = SelectObject(hdc, HGDIOBJ(pen.0));
-    let _ = MoveToEx(hdc, rc.left + px(3.0), rc.top + (rc.bottom - rc.top) / 2, None);
+    let _ = MoveToEx(
+        hdc,
+        rc.left + px(3.0),
+        rc.top + (rc.bottom - rc.top) / 2,
+        None,
+    );
     let _ = LineTo(hdc, rc.left + px(6.0), rc.bottom - px(4.0));
     let _ = LineTo(hdc, rc.right - px(4.0), rc.top + px(3.0));
     SelectObject(hdc, old);
@@ -687,7 +694,11 @@ unsafe fn draw_item(dis: &DRAWITEMSTRUCT) {
         let _ = DeleteObject(HGDIOBJ(fb.0));
         // 「保存」是主按钮：自绘之后 BS_DEFPUSHBUTTON 的语义没了（那也是个类型位），
         // 用一圈更醒目的边框把它标出来，别让用户分不清哪个是确定
-        let edge = if id == ID_SAVE { c.win_fg } else { c.btn_border };
+        let edge = if id == ID_SAVE {
+            c.win_fg
+        } else {
+            c.btn_border
+        };
         let bd = CreateSolidBrush(rgb(edge.0, edge.1, edge.2));
         let _ = FrameRect(hdc, &dis.rc_item, bd);
         let _ = DeleteObject(HGDIOBJ(bd.0));
@@ -717,7 +728,11 @@ fn cycle_theme() {
         let _ = InvalidateRect(Some(hwnd()), None, true);
     }
     crate::popup::repaint();
-    info!("[settings] 主题切到 {}（深色={}）", next.as_str(), theme::is_dark());
+    info!(
+        "[settings] 主题切到 {}（深色={}）",
+        next.as_str(),
+        theme::is_dark()
+    );
 }
 
 fn set_status(text: &str) {
@@ -755,6 +770,9 @@ fn set_font(hw: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
 }
 
 /// 建一个子控件。id 为 0 表示不需要接收消息（纯标签）
+// CreateWindowExW 本身就摊着九个必填参数，这是 Win32 的调用约定，不是设计失误；
+// 硬拆成结构体只会让调用点更绕
+#[allow(clippy::too_many_arguments)]
 fn make(
     class: windows::core::PCWSTR,
     text: &str,
@@ -783,16 +801,11 @@ fn make(
             None,
             None,
         )
-        .unwrap_or(HWND(0 as *mut core::ffi::c_void))
+        .unwrap_or(HWND(std::ptr::null_mut::<core::ffi::c_void>()))
     }
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
             // 子控件通知：wparam 低 16 位是控件 ID，高 16 位是通知码
@@ -808,7 +821,11 @@ unsafe extern "system" fn wndproc(
                 // 系统不会再替我们做这两件事（原因见 BS_OWNERDRAW 那条注释）
                 ID_NOTIFY | ID_AUTO => {
                     let is_notify = id == ID_NOTIFY;
-                    let cell: &AtomicBool = if is_notify { &NOTIFY_CHECK } else { &AUTO_CHECK };
+                    let cell: &AtomicBool = if is_notify {
+                        &NOTIFY_CHECK
+                    } else {
+                        &AUTO_CHECK
+                    };
                     let on = !cell.load(Ordering::SeqCst);
                     cell.store(on, Ordering::SeqCst);
                     let _ = InvalidateRect(
@@ -818,7 +835,11 @@ unsafe extern "system" fn wndproc(
                     );
                     info!(
                         "[settings] 复选框「{}」现在={}",
-                        if is_notify { "低电量时提醒我" } else { "开机时自动启动" },
+                        if is_notify {
+                            "低电量时提醒我"
+                        } else {
+                            "开机时自动启动"
+                        },
                         on
                     );
                 }

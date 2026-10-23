@@ -174,7 +174,11 @@ pub fn reload() {
             mode().as_str()
         );
     } else {
-        info!("[theme] 配色维持{}（模式={}）", if dark { "深色" } else { "浅色" }, mode().as_str());
+        info!(
+            "[theme] 配色维持{}（模式={}）",
+            if dark { "深色" } else { "浅色" },
+            mode().as_str()
+        );
     }
 }
 

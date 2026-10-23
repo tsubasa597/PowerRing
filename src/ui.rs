@@ -8,7 +8,7 @@ use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, GetMonitorInfoW, MonitorFromWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, FF_DONTCARE, HFONT, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, OUT_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, FF_DONTCARE, HFONT, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SYSTEM_METRICS_INDEX};
@@ -24,7 +24,8 @@ const SM_CYVIRTUALSCREEN: i32 = 79;
 /// 96 DPI = 1.0；4K + 150% 缩放 = 1.5
 pub fn scale() -> f32 {
     let dpi = unsafe { GetDpiForSystem() };
-    if dpi <= 0 {
+    // GetDpiForSystem 失败时返回 0（它是无符号类型，不存在负数）
+    if dpi == 0 {
         1.0
     } else {
         dpi as f32 / 96.0

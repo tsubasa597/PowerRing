@@ -20,11 +20,11 @@ mod device;
 mod hidpp;
 mod log;
 mod popup;
+mod profile;
+mod raw;
 mod settings;
 mod theme;
 mod ui;
-mod profile;
-mod raw;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -34,9 +34,7 @@ use std::time::{Duration, Instant};
 
 use hidapi::HidApi;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{
-    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Config;
 use crate::popup::Line;
@@ -230,10 +228,10 @@ fn tier_of(percent: Option<u8>, charging: bool) -> Tier {
 
 fn color_of(percent: u8, charging: bool) -> (u8, u8, u8) {
     match tier_of(Some(percent), charging) {
-        Tier::Charging => (52, 152, 219),  // 充电中：蓝
-        Tier::Critical => (192, 57, 43),   // 严重：红
-        Tier::Warn => (230, 126, 34),      // 警告：橙
-        _ => (39, 174, 96),                // 正常：绿
+        Tier::Charging => (52, 152, 219), // 充电中：蓝
+        Tier::Critical => (192, 57, 43),  // 严重：红
+        Tier::Warn => (230, 126, 34),     // 警告：橙
+        _ => (39, 174, 96),               // 正常：绿
     }
 }
 
@@ -255,7 +253,7 @@ fn icon_rect(tray: &TrayIcon) -> Option<(i32, i32, i32, i32)> {
 
 fn swatch_of(s: &Status) -> (u8, u8, u8) {
     match s.percent {
-        None => (150, 150, 150),     // 未知：灰
+        None => (150, 150, 150), // 未知：灰
         Some(p) => color_of(p, s.charging),
     }
 }
@@ -400,7 +398,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     Arm::Spent
                 };
-                w.arm_warn = if percent > warn { Arm::Armed } else { Arm::Spent };
+                w.arm_warn = if percent > warn {
+                    Arm::Armed
+                } else {
+                    Arm::Spent
+                };
             }
 
             let mut out = None;
@@ -435,7 +437,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 跨档这件事还是记一笔 —— 用户问「怎么不提醒了」时，看日志就知道是开关关着
             if !settings::notify_enabled() {
                 if let Some(_a) = &out {
-                    info!("[alert] 已跨档但提醒开关关着，不弹：{} {}%", w.dev.name, percent);
+                    info!(
+                        "[alert] 已跨档但提醒开关关着，不弹：{} {}%",
+                        w.dev.name, percent
+                    );
                 }
                 return None;
             }
@@ -564,9 +569,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
-            let still_pending =
-                watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
-            let wait = if still_pending { 5 } else { settings::interval() };
+            let still_pending = watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
+            let wait = if still_pending {
+                5
+            } else {
+                settings::interval()
+            };
             // 睡觉改成带唤醒的等待：有人点「立即刷新」就立刻进入下一轮
             match trig_rx.recv_timeout(Duration::from_secs(wait as u64)) {
                 Ok(()) => {
@@ -640,7 +648,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings::open();
     }
 
-    info!("[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）", interval);
+    info!(
+        "[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）",
+        interval
+    );
 
     // ---- 主线程：消息泵 + 渲染 ----
     let mut latest: Vec<Status> = Vec::new();
@@ -660,7 +671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 button_state,
                 rect,
                 ..
-            }             = ev
+            } = ev
             {
                 info!(
                     "[click] {:?} {:?} rect=({},{}) size=({},{}) 面板当前可见={}",
@@ -750,7 +761,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let lines = alerts
                 .iter()
                 .map(|a| Line {
-                    text: format!("{}  {}%{}", a.name, a.percent, if a.critical { "  该充电了" } else { "" }),
+                    text: format!(
+                        "{}  {}%{}",
+                        a.name,
+                        a.percent,
+                        if a.critical { "  该充电了" } else { "" }
+                    ),
                     swatch: color_of(a.percent, false),
                 })
                 .collect::<Vec<_>>();
@@ -765,7 +781,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!(
                 "[alert] {} 台设备跌破阈值：{} 锚点={}",
                 alerts.len(),
-                lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join(" / "),
+                lines
+                    .iter()
+                    .map(|l| l.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
                 match anchor {
                     Some((x, y, _, _)) => format!("托盘 ({},{})", x, y),
                     None => "主屏右下角".to_string(),

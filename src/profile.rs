@@ -238,14 +238,20 @@ impl Raw {
             (Transport::Direct, _) => vec![1],
         };
 
-        let ident = self.identify.unwrap_or(RawIdentify { name_feature: None, contains: None });
+        let ident = self.identify.unwrap_or(RawIdentify {
+            name_feature: None,
+            contains: None,
+        });
         let name_feature = match ident.name_feature.as_deref() {
             Some(f) => Some(hex(f).ok_or("identify.name_feature 不是合法十六进制")?),
             None => None,
         };
 
         // 短名留空就用全名，但去掉首尾空白：YAML 里顺手写的空格不该进到界面上
-        let short_name = self.short.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let short_name = self
+            .short
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         Ok(Profile {
             name: self.name,

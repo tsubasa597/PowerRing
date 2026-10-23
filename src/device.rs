@@ -4,7 +4,7 @@
 //! 扫描只依赖声明里的 VID/PID/usage，不硬编码任何厂商常量。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use hidapi::HidApi;
 
@@ -12,17 +12,19 @@ use crate::hidpp::{Battery, BatteryKind, Hidpp};
 use crate::profile::{Profile, Protocol, Transport};
 use crate::raw::RawDev;
 
+// 这里用 Rc 而不是 Arc：hidapi 的句柄不是 Send，这些对象自始至终活在轮询线程里，
+// 用 Arc 只是白白付原子操作的代价。
 /// 一条实际链路。feature / kind / 报文格式都来自声明 ——
 /// 读什么、怎么解读，不再由代码硬编码。
 enum Link {
     Hidpp {
-        conn: Arc<Hidpp>,
+        conn: Rc<Hidpp>,
         dev_idx: u8,
         feature: u16,
         kind: BatteryKind,
     },
     Raw {
-        dev: Arc<RawDev>,
+        dev: Rc<RawDev>,
     },
 }
 
@@ -37,7 +39,12 @@ pub struct Device {
 impl Device {
     pub fn read(&self) -> Option<Battery> {
         match &self.link {
-            Link::Hidpp { conn, dev_idx, feature, kind } => match kind {
+            Link::Hidpp {
+                conn,
+                dev_idx,
+                feature,
+                kind,
+            } => match kind {
                 BatteryKind::Voltage => conn.battery_voltage(*dev_idx, *feature),
                 BatteryKind::Percent => conn.battery_percent(*dev_idx, *feature),
             },
@@ -49,9 +56,9 @@ impl Device {
 /// 按声明扫描本机所有受支持设备
 pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
     // 同一个 HID 接口可能被多份声明引用（一个接收器上挂着多台设备），只打开一次
-    let mut opened: HashMap<String, Arc<Hidpp>> = HashMap::new();
+    let mut opened: HashMap<String, Rc<Hidpp>> = HashMap::new();
     // raw 设备按「接口 + 声明」缓存：一份声明对应一种报文格式，不能共用
-    let mut raws: HashMap<String, Arc<RawDev>> = HashMap::new();
+    let mut raws: HashMap<String, Rc<RawDev>> = HashMap::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Device> = Vec::new();
 
@@ -81,7 +88,7 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
                             let Ok(dev) = info.open_device(api) else {
                                 continue;
                             };
-                            let conn = Arc::new(Hidpp::new(dev));
+                            let conn = Rc::new(Hidpp::new(dev));
                             opened.insert(key.clone(), conn.clone());
                             conn
                         }
@@ -99,7 +106,7 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
                             let Ok(h) = info.open_device(api) else {
                                 continue;
                             };
-                            let d = Arc::new(RawDev::new(h, spec));
+                            let d = Rc::new(RawDev::new(h, spec));
                             raws.insert(rkey.clone(), d.clone());
                             d
                         }
@@ -118,7 +125,7 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
 /// 枚举结果完全一样。靠一次探测请求区分：耳机没开就没有响应，
 /// 于是它自然从列表里消失，而不是显示一个假的 0%。
 fn scan_raw(
-    dev: &Arc<RawDev>,
+    dev: &Rc<RawDev>,
     prof: &Profile,
     key: &str,
     seen: &mut HashSet<String>,
@@ -139,7 +146,7 @@ fn scan_raw(
 }
 
 fn scan_hidpp(
-    conn: &Arc<Hidpp>,
+    conn: &Rc<Hidpp>,
     prof: &Profile,
     path_key: &str,
     seen: &mut HashSet<String>,

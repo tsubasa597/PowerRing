@@ -64,7 +64,11 @@ impl RawDev {
         } else {
             lookup(&s.table, state, value)?
         };
-        Some(Battery { percent, mv: 0, charging })
+        Some(Battery {
+            percent,
+            mv: 0,
+            charging,
+        })
     }
 
     /// 扫描时用：能不能读到一条能解析的响应，就是「这台设备在不在」的证据。
@@ -100,7 +104,15 @@ mod tests {
             (0x0eu8, vec![(89u8, 10u8), (119, 15), (239, 60), (255, 65)]),
             (
                 0x0f,
-                vec![(19, 70), (49, 75), (69, 80), (99, 85), (119, 90), (129, 95), (255, 100)],
+                vec![
+                    (19, 70),
+                    (49, 75),
+                    (69, 80),
+                    (99, 85),
+                    (119, 90),
+                    (129, 95),
+                    (255, 100),
+                ],
             ),
         ];
         assert_eq!(lookup(&t, 0x0e, 231), Some(60));

@@ -80,7 +80,7 @@ fn read_value() -> Option<String> {
             return None;
         }
         // REG_SZ 是 UTF-16，按 u16 个数申请，末尾的 NUL 也算在 size 里
-        let mut buf: Vec<u16> = vec![0; (size as usize + 1) / 2];
+        let mut buf: Vec<u16> = vec![0; (size as usize).div_ceil(2)];
         let mut got = size;
         let mut ty = REG_SZ;
         let err = RegQueryValueExW(
@@ -125,12 +125,16 @@ pub fn is_enabled() -> bool {
         Some(v) => {
             // 允许值里带引号和启动参数，取第一段路径来比
             let first = v.trim().trim_matches('"');
-            let hit = first.eq_ignore_ascii_case(&cur.to_string_lossy().to_string());
+            let hit = first.eq_ignore_ascii_case(cur.to_string_lossy().as_ref());
             info!(
                 "[autostart] 注册表里是 {:?}，当前 exe 是 {:?}，判定为 {}",
                 v,
                 cur.display(),
-                if hit { "已开启" } else { "未开启（指向别处）" }
+                if hit {
+                    "已开启"
+                } else {
+                    "未开启（指向别处）"
+                }
             );
             hit
         }
@@ -151,19 +155,8 @@ pub fn set(on: bool) -> Result<(), String> {
 
     let err = if on {
         let cmd = command_line().ok_or_else(|| "取不到本程序的路径".to_string())?;
-        let bytes: Vec<u8> = cmd
-            .iter()
-            .flat_map(|u| u.to_ne_bytes())
-            .collect();
-        unsafe {
-            RegSetValueExW(
-                hk,
-                PCWSTR(name.as_ptr()),
-                None,
-                REG_SZ,
-                Some(&bytes),
-            )
-        }
+        let bytes: Vec<u8> = cmd.iter().flat_map(|u| u.to_ne_bytes()).collect();
+        unsafe { RegSetValueExW(hk, PCWSTR(name.as_ptr()), None, REG_SZ, Some(&bytes)) }
     } else {
         unsafe { RegDeleteValueW(hk, PCWSTR(name.as_ptr())) }
     };

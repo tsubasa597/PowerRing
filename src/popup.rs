@@ -27,8 +27,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, RegisterClassW, SetWindowPos,
-    ShowWindow, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WM_LBUTTONDOWN,
-    WM_PAINT, WM_SETTINGCHANGE, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WM_LBUTTONDOWN, WM_PAINT,
+    WM_SETTINGCHANGE, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// 卡片槽位。索引就是它们在下面各个静态数组里的下标
@@ -69,7 +69,9 @@ fn top() -> i32 {
 // 全局状态：wndproc 必须是 extern "system" 的自由函数，拿不到闭包上下文，
 // 所以状态只能放静态。HWND 是裸指针包装、不保证 Sync，用整型存地址。
 static HWS: [AtomicIsize; N] = [AtomicIsize::new(0), AtomicIsize::new(0)];
-static LINES: [Mutex<Vec<(String, (u8, u8, u8))>>; N] = [Mutex::new(Vec::new()), Mutex::new(Vec::new())];
+/// 卡片里的一袋行：每行 = (文字, 色块 RGB)。静态数组多处引用，起个名字省得反复写这一长串
+type Rows = Vec<(String, (u8, u8, u8))>;
+static LINES: [Mutex<Rows>; N] = [Mutex::new(Vec::new()), Mutex::new(Vec::new())];
 static TITLES: [Mutex<String>; N] = [Mutex::new(String::new()), Mutex::new(String::new())];
 static VISIBLE: [AtomicBool; N] = [AtomicBool::new(false), AtomicBool::new(false)];
 static SHOWN_AT: [Mutex<Option<Instant>>; N] = [Mutex::new(None), Mutex::new(None)];
@@ -101,7 +103,7 @@ pub fn create() -> Result<(), windows::core::Error> {
     };
     unsafe {
         RegisterClassW(&class);
-        for idx in 0..N {
+        for slot in &HWS {
             let hw = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 w!("PowerRingPopup"),
@@ -116,7 +118,7 @@ pub fn create() -> Result<(), windows::core::Error> {
                 None,
                 None,
             )?;
-            HWS[idx].store(hw.0 as isize, Ordering::SeqCst);
+            slot.store(hw.0 as isize, Ordering::SeqCst);
         }
     }
     Ok(())
@@ -277,9 +279,7 @@ fn refresh_card(idx: usize, lines: Vec<Line>) {
 pub fn tick() {
     for idx in 0..N {
         let expired = match SHOWN_AT[idx].lock() {
-            Ok(g) => g
-                .map(|t| t.elapsed() >= AUTO_HIDE[idx])
-                .unwrap_or(false),
+            Ok(g) => g.map(|t| t.elapsed() >= AUTO_HIDE[idx]).unwrap_or(false),
             Err(_) => false,
         };
         if expired {
@@ -288,12 +288,7 @@ pub fn tick() {
     }
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
             let idx = idx_of(hwnd);
