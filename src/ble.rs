@@ -29,8 +29,8 @@
 //! notes 里写明了。
 
 use windows::core::GUID;
-use windows::Devices::Bluetooth::GenericAttributeProfile::{
-    GattCharacteristic, GattCommunicationStatus, GattDeviceService, GattServiceUuids,
+use windows::Devices::Bluetooth::{
+    BluetoothConnectionStatus, BluetoothLEDevice, GenericAttributeProfile as GP,
 };
 use windows::Devices::Enumeration::DeviceInformation;
 use windows::Storage::Streams::DataReader;
@@ -57,7 +57,8 @@ pub struct Node {
 /// 这只是「这类设备暂时不可用」，不该把整个程序拖下水。
 pub fn enumerate() -> Option<Vec<Node>> {
     let selector =
-        GattDeviceService::GetDeviceSelectorFromUuid(GattServiceUuids::Battery().ok()?).ok()?;
+        GP::GattDeviceService::GetDeviceSelectorFromUuid(GP::GattServiceUuids::Battery().ok()?)
+            .ok()?;
     let devs = DeviceInformation::FindAllAsyncAqsFilter(&selector)
         .ok()?
         .get()
@@ -110,14 +111,16 @@ fn hex16(s: &str) -> Option<u16> {
 
 /// 一个已经打开的电池通道。持有它就不用每轮重新发现一次 GATT
 pub struct Dev {
-    ch: GattCharacteristic,
+    /// 设备接口路径。查连接状态时要用，所以留在手上
+    id: String,
+    ch: GP::GattCharacteristic,
 }
 
 impl Dev {
     /// 打开设备的电池服务并找到 Battery Level 通道。
     /// 打开了服务但里面没有那个通道也算失败 —— 有些厂商挂了 0x180F 却不放 0x2A19
     pub fn open(id: &str) -> Result<Dev, String> {
-        let svc = GattDeviceService::FromIdAsync(&windows::core::HSTRING::from(id))
+        let svc = GP::GattDeviceService::FromIdAsync(&windows::core::HSTRING::from(id))
             .map_err(|e| format!("打开 GATT 服务失败：{e}"))?
             .get()
             .map_err(|e| format!("等待 GATT 服务超时：{e}"))?;
@@ -131,7 +134,10 @@ impl Dev {
         for ch in chars {
             if let Ok(u) = ch.Uuid() {
                 if u == BATTERY_LEVEL {
-                    return Ok(Dev { ch });
+                    return Ok(Dev {
+                        id: id.to_string(),
+                        ch,
+                    });
                 }
             }
         }
@@ -139,7 +145,14 @@ impl Dev {
     }
 
     /// 读一次电量。标准只给百分比，**不含是否在充电的信息** —— 所以 charging 恒为 false
+    ///
+    /// 设备不在就不给值。这不是多此一举：缓存会把关机设备的最后读数一直留着，
+    /// 光看「读没读到」根本分不出它在不在（详见模块头注释），所以这里额外看一眼
+    /// 连接状态，交给上层用「连续几次读不到」的既有机制把它请出列表。
     pub fn battery(&self) -> Option<Battery> {
+        if !self.connected() {
+            return None;
+        }
         let percent = self.raw()?;
         Some(Battery {
             percent,
@@ -148,21 +161,52 @@ impl Dev {
         })
     }
 
-    /// 扫描时用：读得到就算在线。读不到不一定是关机，也可能是暂时连不上，
-    /// 所以由上层用连续失败次数来判断要不要移出列表。
-    ///
-    /// 注意这里判定力很弱：读的是缓存，设备关机、甚至早已不在身边也会照样
-    /// 有值返回（详见模块头注释）。**不要指望它把"不在这儿"的设备挡在外面**，
-    /// 它只能挡住连缓存都还没建立过的设备。
+    /// 扫描时用：既要读得到值，也要设备在线。两条挨在一起讲清楚它们的分工 ——
+    /// `raw()` 只能证明「缓存里有个数」，`connected()` 才能证明「这台设备还在这儿」
     pub fn probe(&self) -> bool {
-        self.raw().is_some()
+        self.connected() && self.raw().is_some()
+    }
+
+    /// 设备的蓝牙连接是不是还连着。
+    ///
+    /// ⚠️ **这里的验证是不对称的，改之前先看清楚**：
+    ///   离线的一半验证过了 —— 关机充电的手柄、放在公司的键盘，都是 Disconnected，
+    ///   判对了。在线的一半还没验 —— 因为手上暂时没有在线的蓝牙设备可对照。
+    /// 如果哪天发现「正在用的设备莫名消失」，第一个嫌疑就是这个函数返回了 false，
+    ///   先看这里的日志，别急着怀疑上面的轮询逻辑。
+    ///
+    /// 取不到状态时按在线算（返回 true）：宁可多显示一台，也别因为一次 API
+    /// 抽风把正在用的设备从托盘里摘掉。真正离线的设备会**连续**失败，上层
+    /// 有三次容错，一次误判不会被放大成"设备消失"。
+    fn connected(&self) -> bool {
+        let Ok(op) = BluetoothLEDevice::FromIdAsync(&windows::core::HSTRING::from(&self.id)) else {
+            warn!("[ble] 建 BluetoothLEDevice 失败，按在线处理");
+            return true;
+        };
+        match op.get() {
+            Ok(dev) => match dev.ConnectionStatus() {
+                // 不记 normal 情况：轮询每几秒一次，正常情况的日志会把滚动日志冲干净，
+                // 而「设备离线」这件事上层本来就有「读取失败」的日志在讲
+                Ok(s) => s == BluetoothConnectionStatus::Connected,
+                Err(e) => {
+                    warn!("[ble] 取连接状态失败 {e}，按在线处理");
+                    true
+                }
+            },
+            // FromIdAsync 本身失败多半是设备已不在，但也有概率是系统忙。
+            // 这里保守按在线处理，交给上层的连续失败计数兜底
+            Err(e) => {
+                warn!("[ble] FromIdAsync 失败 {e}，按在线处理");
+                true
+            }
+        }
     }
 
     fn raw(&self) -> Option<u8> {
         // 有意不用 Uncached：实测在本机两台设备上都返回 Unreachable，
         // 见模块头注释。这里读到的就是 Windows 自己在用的那个值
         let r = self.ch.ReadValueAsync().ok()?.get().ok()?;
-        if r.Status().ok()? != GattCommunicationStatus::Success {
+        if r.Status().ok()? != GP::GattCommunicationStatus::Success {
             return None;
         }
         let buf = r.Value().ok()?;
