@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 本项目是 Windows 专属且依赖 Win32 API，默认工具链的 MSVC target 正合适
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 单元测试
+        run: cargo test
+
+      - name: Release 构建
+        run: cargo build --release
+
+      # 体积是验收项之一（验收线 5 MB），每次 CI 都量一下，超了能第一时间发现
+      - name: 报告产物体积
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release/powerring.exe
+          $mb = [math]::Round($exe.Length / 1MB, 2)
+          Write-Host "powerring.exe = $mb MB"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "powerring.exe = $mb MB"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: powerring-windows-x64
+          path: |
+            target/release/powerring.exe
+            devices/

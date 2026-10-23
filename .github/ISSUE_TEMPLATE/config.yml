@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 想让自己的设备被支持
+    url: https://github.com/vkeyzhen/PowerRing/blob/main/docs/adding-a-device.md
+    about: 先看这份教程 —— 加一台设备只需要一份 YAML，流程都写在里面了
+  - name: 只是有一份报文 / 一组对照读数
+    url: https://github.com/vkeyzhen/PowerRing/issues/new?template=new-device.yml
+    about: 用「新设备请求」贴上来就行，剩下的标定可以交给别人继续

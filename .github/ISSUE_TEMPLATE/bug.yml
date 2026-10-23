@@ -1,0 +1,91 @@
+name: 出问题了
+description: 电量读数不对、托盘没反应、界面显示错位
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    value: |
+      **麻烦贴一下日志**：`%APPDATA%\PowerRing\log.txt`
+      程序是隐蔽后台运行的，没有控制台窗口，日志是我们唯一能看到现场的地方。
+      复现之后立刻把文件末尾几十行附上就行。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 你看到了什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: expect
+    attributes:
+      label: 你期望看到什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 日志
+      description: "`%APPDATA%\\PowerRing\\log.txt` 的相关部分。路径可以直接粘到资源管理器的地址栏里"
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: Release 版本号，或者自己编的话写 commit hash
+      placeholder: v0.1.0
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 10 22H2 (19045.3803)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: screens
+    attributes:
+      label: 屏幕情况
+      description: >
+        这个项目踩过不少 DPI 和多屏的坑 —— 弹窗位置算错、界面太小这类问题，
+        几乎总能追溯到缩放比例和多屏布局
+      options:
+        - 单屏
+        - 多屏（副屏在右）
+        - 多屏（副屏在左）
+        - 多屏（上下排列）
+    validations:
+      required: false
+
+  - type: input
+    id: scale
+    attributes:
+      label: 缩放比例
+      description: 设置 → 系统 → 显示 → 缩放。多屏的话两个都写上
+      placeholder: "主屏 150%，副屏 100%"
+    validations:
+      required: false
+
+  - type: input
+    id: theme
+    attributes:
+      label: 界面配色
+      placeholder: 跟随系统 / 浅色 / 深色
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充
+      description: 设备型号、截图、你觉得可能有关的细节
+    validations:
+      required: false

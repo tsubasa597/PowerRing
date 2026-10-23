@@ -1,0 +1,39 @@
+name: 功能建议
+description: 想让 PowerRing 多一个本事
+title: "[建议] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: >
+        写问题本身，别急着提方案 —— 同一个问题也许有更省事的解法。
+        顺便说一句：本项目不做联网、不做账号、不做遥测，这类建议不用提了
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你想象中它长什么样
+      description: 可选。有想法就写，没有也没关系
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 会不会跟下面这些原则冲突
+      options:
+        - 不会
+        - 不确定，想先聊聊
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充
+    validations:
+      required: false

@@ -1,0 +1,95 @@
+name: 新设备请求
+description: 让你的鼠标 / 耳机 / 手柄被 PowerRing 认出来
+title: "[设备] "
+labels: ["device"]
+body:
+  - type: markdown
+    value: |
+      感谢！在提交之前，可以先读一下 [docs/adding-a-device.md](https://github.com/vkeyzhen/PowerRing/blob/main/docs/adding-a-device.md) ——
+      里面有一份手把手教程，看完你就知道下面这些格子该怎么填了。
+
+      **只报数据也算贡献**：如果标定那一步你做不了，"原始数值 ↔ 真实百分比" 的对照表贴上来就行，剩下的交给别人。
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备名与型号
+      description: 写全称，比如 "Logitech G PRO Wireless"，后面还要给它起个短名用在悬停提示里
+      placeholder: HyperX Cloud III S Wireless
+    validations:
+      required: true
+
+  - type: input
+    id: ids
+    attributes:
+      label: VID / PID / usage
+      description: >
+        设备管理器 → 属性 → 详细信息 → 硬件 ID 里能看到 VID_xxxx 与 PID_xxxx；
+        剩下两个跑 `python tools/probe.py list --vid 0x你的VID` 就能拿到。还不确定的话先留空
+      placeholder: "0x0951:0x1723  usage_page=0xFF90 usage=0x0303"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: official
+    attributes:
+      label: 官方软件能显示它的电量吗
+      description: >
+        这是本项目能否成功的关键前提 —— 官方能读出来，说明数据已经到了电脑上。
+        能不能精确到一个数字（而不是只显示个电池图标）也很要紧
+      options:
+        - 能，精确到百分比
+        - 能，但只有几格电量条 / 图标，没有数字
+        - 不能，官方软件也不显示
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: official_app
+    attributes:
+      label: 那个软件叫什么
+      placeholder: Logitech G HUB / HyperX NGENUITY / Razer Synapse
+    validations:
+      required: false
+
+  - type: textarea
+    id: source
+    attributes:
+      label: 协议信息来源
+      description: >
+        你在哪里查到 / 抓到的报文格式？贴链接。开源项目的请一并写清楚它的许可证 ——
+        本项目可以移植协议常量（事实），但不能复制 GPL 项目的源码，出处要能追溯
+      placeholder: "https://github.com/xxx/yyy （MIT）"
+    validations:
+      required: false
+
+  - type: textarea
+    id: readings
+    attributes:
+      label: 对照读数
+      description: >
+        用来做标定的数据：PowerRing 日志里的原始数值，对应官方软件显示的百分比。
+        多给几组效果最好，尤其是电量比较低的那一段
+      placeholder: |
+        231 -> 60%
+        210 -> 50% 左右（官方软件 49%）
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: verified
+    attributes:
+      label: 验证情况
+      options:
+        - label: 我已经上过真机，数值对得上（±2% 以内）
+        - label: 我还需要帮忙标定 / 还只是有一份报文
+        - label: 我愿意把设备借给维护者远程调试（远程会话，不寄实物）
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充
+      description: 踩到的坑、抓到的线索、想问的问题，都可以写在这
+    validations:
+      required: false
