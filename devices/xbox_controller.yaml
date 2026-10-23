@@ -1,0 +1,39 @@
+# Xbox 无线手柄（Series，蓝牙连接）
+#
+# 这是第一份 protocol: ble 的声明 —— 也是本项目第一份**完全不需要逆向**的声明：
+# 蓝牙 SIG 把「读电池」这件事定成了公开标准，设备照着做，系统照着开，
+# 我们只要按标准 UUID 去读就行，不用像罗技、HyperX 那样去猜报文。
+#
+# 声明里连一个字节的报文都没有 —— 这也是它与 hid++2.0 / raw 最大的区别。
+
+name: "Xbox Wireless Controller"
+short: "Xbox 手柄"
+protocol: "ble"
+# 蓝牙设备自身就是终点，不存在「一个接收器挂多台」，所以永远是 direct
+transport: "direct"
+
+# 这里的 PID 是**蓝牙模式**下的产品号。用 Xbox 无线适配器连接时产品号会变，
+# 而且那时走的不是标准 GATT，而是微软私有的 GIP 协议 —— 那条路本项目没走。
+match:
+  vendor_id: "0x045E"
+  product_id: "0x0B13"   # Series X|S 手柄的蓝牙模式；旧款 Xbox One S 手柄常见是 0x02FD
+
+battery:
+  kind: "percent"        # 标准 Battery Level 读出来就是百分比，不用换算
+
+protocol_source: "蓝牙 SIG 公开标准：Battery Service 0x180F / Battery Level 0x2A19"
+verification: "verified"
+
+notes: >
+  实测（本机蓝牙连接）读 Battery Level 得 32%。
+
+  换连接方式就读不到了：USB 有线不走 GATT，Xbox 无线适配器走的是微软私有 GIP
+  协议，只有蓝牙模式才暴露标准 Battery Service —— 所以这条声明只覆盖蓝牙连接。
+
+  两条诚实的说明：
+  1. 32% 是设备自己报的标准百分比，不像电压式那样需要换算，
+     但**还没跟 Windows 蓝牙设置里显示的电量做过交叉对照**。这是下一步要做的事。
+  2. 标准 Battery Level 只有一个百分比字节，没有「是否在充电」这一位，
+     所以这台设备在程序里永远不会显示为充电中 —— 这是标准的限制，不是 bug。
+
+  设备名不是声明里写死的，用的是系统蓝牙配对里认到的那个名字。

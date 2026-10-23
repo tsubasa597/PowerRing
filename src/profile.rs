@@ -19,6 +19,10 @@ use crate::hidpp::BatteryKind;
 pub enum Protocol {
     /// 罗技 HID++ 2.0
     Hidpp20,
+    /// 蓝牙标准 Battery Service（0x180F）。
+    /// 与上面两类最大的区别：**不需要逆向** —— UUID 是蓝牙 SIG 定的公开标准，
+    /// 声明里连报文都不用写，只要有 VID/PID 就能读
+    Ble,
     /// 原始报文：请求/响应都是裸字节，格式全写在声明里。
     /// 为非 HID++ 的设备（HyperX、雷蛇等）准备 —— 它们的报文各家自定义，
     /// 与其每加一家就写一份 Rust，不如把「发什么、读哪几个字节、怎么换算」
@@ -210,6 +214,7 @@ impl Raw {
         let protocol = match self.protocol.trim().to_ascii_lowercase().as_str() {
             "" | "hid++2.0" | "hidpp20" | "hidpp" => Protocol::Hidpp20,
             "raw" | "raw_report" => Protocol::Raw,
+            "ble" | "bluetooth" | "ble-gatt" => Protocol::Ble,
             other => return Err(format!("不支持的协议 {other}")),
         };
         // raw 协议的报文规格是必填的：没有请求字节就无从下手，
@@ -219,10 +224,15 @@ impl Raw {
         } else {
             None
         };
-        let transport = match self.transport.trim().to_ascii_lowercase().as_str() {
-            "" | "receiver" => Transport::Receiver,
-            "direct" => Transport::Direct,
-            other => return Err(format!("不支持的连接方式 {other}")),
+        // 蓝牙设备自身就是终点，没有「一个接收器挂多台」这回事，所以不认 receiver。
+        // 声明里就算写了 receiver 也按 direct 处理 —— 写错不该变成一个空列表
+        let transport = match protocol {
+            Protocol::Ble => Transport::Direct,
+            _ => match self.transport.trim().to_ascii_lowercase().as_str() {
+                "" | "receiver" => Transport::Receiver,
+                "direct" => Transport::Direct,
+                other => return Err(format!("不支持的连接方式 {other}")),
+            },
         };
         let battery_kind = match self.battery.kind.trim().to_ascii_lowercase().as_str() {
             "" | "voltage" | "voltage-mv" | "mv" => BatteryKind::Voltage,

@@ -15,6 +15,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod autostart;
+mod ble;
 mod config;
 mod device;
 mod hidpp;

@@ -31,6 +31,12 @@ features = [
     "Win32_Security",
     # M2：深色主题下把窗口标题栏也变深（DWM 属性）
     "Win32_Graphics_Dwm",
+    # M3：蓝牙设备读标准 Battery Service（0x180F / 0x2A19）
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Enumeration",
+    "Foundation",
+    "Storage_Streams",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先

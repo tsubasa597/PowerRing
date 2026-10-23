@@ -11,6 +11,7 @@ use hidapi::HidApi;
 use crate::hidpp::{Battery, BatteryKind, Hidpp};
 use crate::profile::{Profile, Protocol, Transport};
 use crate::raw::RawDev;
+use crate::warn;
 
 // 这里用 Rc 而不是 Arc：hidapi 的句柄不是 Send，这些对象自始至终活在轮询线程里，
 // 用 Arc 只是白白付原子操作的代价。
@@ -22,6 +23,9 @@ enum Link {
         dev_idx: u8,
         feature: u16,
         kind: BatteryKind,
+    },
+    Ble {
+        dev: Rc<crate::ble::Dev>,
     },
     Raw {
         dev: Rc<RawDev>,
@@ -49,6 +53,7 @@ impl Device {
                 BatteryKind::Percent => conn.battery_percent(*dev_idx, *feature),
             },
             Link::Raw { dev } => dev.battery(),
+            Link::Ble { dev } => dev.battery(),
         }
     }
 }
@@ -63,6 +68,11 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
     let mut out: Vec<Device> = Vec::new();
 
     for prof in profiles {
+        // 蓝牙设备压根不走 HID 枚举，单独处理
+        if prof.protocol == Protocol::Ble {
+            scan_ble(prof, &mut seen, &mut out);
+            continue;
+        }
         for info in api.device_list() {
             if info.vendor_id() != prof.vid || info.product_id() != prof.pid {
                 continue;
@@ -81,6 +91,7 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
             let key = info.path().to_string_lossy().to_string();
 
             match prof.protocol {
+                Protocol::Ble => unreachable!("蓝牙在上面已单独处理"),
                 Protocol::Hidpp20 => {
                     let conn = match opened.get(&key) {
                         Some(c) => c.clone(),
@@ -117,6 +128,44 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
         }
     }
     out
+}
+
+/// 蓝牙设备的扫描。**每轮都重新枚举**，不像 HID 那样跨轮缓存句柄 ——
+/// 接口路径里带着会话相关的部分，断开重连后会变，攥着旧路径去打开只会失败。
+/// 开一次 GATT 服务几百毫秒的量级，一分钟扫一次不值得为此优化。
+///
+/// 同样遵循「读得到才算它在」：枚举里挂着不代表连着，手柄关机后服务还会留一会儿，
+/// 用一次读取来定性，比枚举结果诚实。
+fn scan_ble(prof: &Profile, seen: &mut HashSet<String>, out: &mut Vec<Device>) {
+    for node in crate::ble::enumerate().unwrap_or_default() {
+        if node.vid != prof.vid || node.pid != prof.pid {
+            continue;
+        }
+        let dev = match crate::ble::Dev::open(&node.id) {
+            Ok(d) => Rc::new(d),
+            Err(e) => {
+                warn!("[ble] {} 打开失败：{e}", node.name);
+                continue;
+            }
+        };
+        if !dev.probe() {
+            continue;
+        }
+        let key = format!("ble#{:04X}-{:04X}", node.vid, node.pid);
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(Device {
+            // 用系统在蓝牙里认到的名字，比声明里的名字更贴用户看到的那台设备
+            name: if node.name.is_empty() {
+                prof.name.clone()
+            } else {
+                node.name
+            },
+            short: prof.short_name.clone().unwrap_or_else(|| prof.name.clone()),
+            link: Link::Ble { dev },
+        });
+    }
 }
 
 /// raw 设备的扫描：**能读到一条有效响应才算它在**。

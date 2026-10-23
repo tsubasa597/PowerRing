@@ -30,6 +30,13 @@ Settings expose the refresh interval, warning and critical thresholds, the alert
 | --- | --- | --- | --- |
 | Logitech G PRO Wireless | receiver `046D:C539`, usage page `FF00` / usage `0002`, slots 1–6 | HID++ 2.0 `0x1001` voltage (mV → discharge curve) | Verified. 3744 mV reads as 28%, G HUB showed 29% at the same time |
 | HyperX Cloud Flight | receiver `0951:1723`, usage page `FF90` / usage `0303` | vendor report `21 FF 05` (direct mode) | Verified. Raw value 231 reads as 60% |
+| Xbox Wireless Controller (Series) | **Bluetooth**, VID `045E` / PID `0B13` | standard Battery Service `0x180F` / `0x2A19` | Verified. Device reports 17% itself |
+
+The third row needs **no reverse engineering at all**: the Bluetooth SIG standardised how to read battery level, so any compliant device is read by UUID and its YAML carries not a single byte of a report. To list every such device on your machine:
+
+```bash
+cargo run --release --example ble_probe
+```
 
 Device declarations live in `devices/`. Every YAML carries `protocol_source` (where the constants came from) and `verification`. **Anything not tested on real hardware is marked `unverified`.**
 
@@ -49,7 +56,19 @@ PowerRing/
 
 ## Adding a device
 
-Copy the closest YAML in `devices/` and edit a few lines. **No Rust code changes required.** Two flavours:
+Copy the closest YAML in `devices/` and edit a few lines. **No Rust code changes required.** Three flavours:
+
+**Bluetooth standard devices** (controllers, some keyboards) need nothing but VID/PID — no report bytes at all:
+
+```yaml
+protocol: "ble"
+transport: "direct"
+match:
+  vendor_id: "0x045E"
+  product_id: "0x0B13"   # product id in Bluetooth mode
+battery:
+  kind: "percent"        # Battery Level already is a percentage
+```
 
 **HID++ 2.0 devices** (Logitech family) use a feature index plus a reading mode:
 
@@ -135,8 +154,9 @@ Output: `target/release/powerring.exe` (~0.9 MB).
 
 ## Known limitations
 
-- Bluetooth devices such as AirPods are not supported: they report over BLE GATT and Windows usually surfaces them already
-- Xbox controllers are not wired up yet
+- **Bluetooth devices are supported, with a caveat**: they must expose the standard Battery Service (controllers, some keyboards). Anything on a vendor-proprietary protocol such as AirPods is out — Windows already surfaces those anyway
+- Xbox controllers are readable **only over Bluetooth**: USB cable never routes through GATT and the wireless adapter speaks Microsoft's proprietary GIP
+- Bluetooth Battery Level carries a single percentage byte with **no charging flag**, so these devices never show as charging
 - When a reading fails the ring turns grey instead of guessing
 
 ## License boundary
