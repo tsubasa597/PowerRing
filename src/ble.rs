@@ -10,6 +10,23 @@
 //!
 //! WinRT 异步一律用 `get()` 同步等结果：轮询线程每几分钟才调一次，
 //! 为它引入一套异步运行时不值得，阻塞等待反而让出错路径简单得多。
+//!
+//! ## 为什么读缓存，而不是实时
+//!
+//! WinRT 有两种读法：`ReadValueAsync()` 走缓存，
+//! `ReadValueWithCacheModeAsync(Uncached)` 会真的往设备发一次 GATT 读请求。
+//! 直觉上后者更准，实测却不是这么回事 —— 本机两台设备上 Uncached 一律返回
+//! `Unreachable`，包括那台肯定在线的设备。Windows 不替桌面进程维持这些设备的
+//! GATT 会话，硬读只会读不到。
+//!
+//! 于是读缓存，而这么选还有个额外的好处：**我们读到的值与 Windows 蓝牙设置里
+//! 显示的是同一个**（2026-10-23 交叉对照，两边同为 12%），用户不会看到两个软件
+//! 各说各话。代价是刷新节奏由系统掌握，实测几分钟一次。
+//!
+//! 副作用要清楚：系统会长期留着已配对设备的最后读数，哪怕那台设备已经关机、
+//! 甚至早就不在身边。本机就有一台放在公司的键盘，长年能枚举到、能读出 100%。
+//! 这是 Windows 的行为，本项目选择跟随，并在 `devices/xbox_controller.yaml` 的
+//! notes 里写明了。
 
 use windows::core::GUID;
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -132,12 +149,18 @@ impl Dev {
     }
 
     /// 扫描时用：读得到就算在线。读不到不一定是关机，也可能是暂时连不上，
-    /// 所以由上层用连续失败次数来判断要不要移出列表
+    /// 所以由上层用连续失败次数来判断要不要移出列表。
+    ///
+    /// 注意这里判定力很弱：读的是缓存，设备关机、甚至早已不在身边也会照样
+    /// 有值返回（详见模块头注释）。**不要指望它把"不在这儿"的设备挡在外面**，
+    /// 它只能挡住连缓存都还没建立过的设备。
     pub fn probe(&self) -> bool {
         self.raw().is_some()
     }
 
     fn raw(&self) -> Option<u8> {
+        // 有意不用 Uncached：实测在本机两台设备上都返回 Unreachable，
+        // 见模块头注释。这里读到的就是 Windows 自己在用的那个值
         let r = self.ch.ReadValueAsync().ok()?.get().ok()?;
         if r.Status().ok()? != GattCommunicationStatus::Success {
             return None;
