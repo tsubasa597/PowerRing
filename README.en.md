@@ -29,6 +29,7 @@ Settings expose the refresh interval, warning and critical thresholds, the alert
 | Device | Interface | Reading taken from | Status |
 | --- | --- | --- | --- |
 | Logitech G PRO Wireless | receiver `046D:C539`, usage page `FF00` / usage `0002`, slots 1–6 | HID++ 2.0 `0x1001` voltage (mV → discharge curve) | Verified. 3744 mV reads as 28%, G HUB showed 29% at the same time |
+| Logitech G PRO Wireless (plugged in) | **USB cable** `046D:C088`, usage page `FF00` / usage `0002` | same `0x1001` feature | Verified. 4101 mV reads as 93%, correctly shown as charging |
 | HyperX Cloud Flight | receiver `0951:1723`, usage page `FF90` / usage `0303` | vendor report `21 FF 05` (direct mode) | Verified. Raw value 231 reads as 60% |
 | Xbox Wireless Controller (Series) | **Bluetooth**, VID `045E` / PID `0B13` | standard Battery Service `0x180F` / `0x2A19` | Verified. Device reports 17% itself |
 

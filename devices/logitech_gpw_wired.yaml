@@ -1,0 +1,51 @@
+# 罗技 G PRO Wireless（GPW）—— 有线模式
+#
+# 与 logitech_gpw.yaml 是同一台鼠标，区别只在它现在**插着 USB 线**。
+# 插线和不插线在系统眼里是两个不同的 USB 设备，PID 都不一样，所以是两份声明。
+# 这也等于给了它第二种身份：不用猜报文，同一个 HID++ feature 照样能读。
+
+name: "Logitech G PRO Wireless"
+short: "GPW"
+
+protocol: "hid++2.0"
+# 有线时鼠标自己挂在 USB 上，不存在「经接收器按 slot 寻址」这回事
+transport: "direct"
+
+match:
+  vendor_id: "0x046D"
+  # 有线模式的 PID，与接收器模式（0xC539）不同。
+  # 这个值来自 2026-10-23 实测枚举；手柄/鼠标换个批次或固件有可能变动，
+  # 换了新的就用 tools/probe.py list --vid 0x046D 看一眼实际值
+  product_id: "0xC088"
+  usage_page: "0xFF00"
+  usage: "0x0002"       # 长报文接口（20 字节）
+
+battery:
+  feature: "0x1001"     # 电压式，与无线时同一个 feature
+  kind: "voltage"
+
+# 保留识别：万一别的罗技设备也用了这个 PID，靠名字把关
+identify:
+  name_feature: "0x0005"
+  contains: "PRO WIRELESS"
+
+protocol_source: "Logitech HID++ 2.0，常量参考 Solaar（GPL-3.0）公开文档"
+verification: "verified"
+
+notes: >
+  实测（插线充电中）：读到 4100 mV，flags = 0x80 表示正在充电。
+
+  这份声明解决的是一个挺别扭的体验问题 —— **鼠标没电插上线的那一刻，托盘里
+  它反而消失了**。接收器拔了，原来那条链路断了，而人恰恰是这时候最想知道
+  「充到多少了」。有线模式走的是同一个 HID++ feature，补上这份声明就接住了。
+
+  两个细节：
+  1. 直连设备不挑 device index。实测 0x00 / 0x01 / 0x02 / 0x03 / 0xFF 全都
+     有响应（会把请求里的 index 原样回显），这块和接收器模式要逐个 slot 试不一样。
+  2. 充电标志位是 flags 的 bit7 —— 之前 GPW 一直在无线模式下、电量又总在中高位，
+     没机会确认这位，这次是在真充电状态下第一次核对上的。
+
+  会不会和接收器那份声明同时显示成两台 GPW？推测不会 —— 鼠标插线时工作在有线模式，
+  接收器上那个 slot 就空了，那份自然匹配不上。**但这条还没验证**：当时接收器是拔着
+  的，只试了「只有线」这一种情形。要验就把接收器插回去、线也别拔，看托盘会不会
+  变成两台。如果真出现了，得给同一台设备的多条链路加去重。

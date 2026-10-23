@@ -141,7 +141,7 @@ python tools/probe.py scan --vid 0x0951 --pid 0x1723 --cmds "21 FF 05,06 FF 05"
 | --- | --- | --- |
 | `name` | ✅ | 设备全名，显示在左键面板里 |
 | `short` | | 悬停 tooltip 用的短名。多个设备悬停文字会拼在一起，全名太长的话填一个，如 `GPW` / `Cloud Flight` |
-| `protocol` | ✅ | `hid++2.0`（罗技）或 `raw`（其他） |
+| `protocol` | ✅ | `hid++2.0`（罗技）、`raw`（其他）、`ble`（蓝牙标准电量） |
 | `transport` | ✅ | `receiver` = 经接收器按 slot 寻址；`direct` = 直连（含自带接收器已配对成一台的情形） |
 | `match` | ✅ | `vendor_id` / `product_id` / `usage_page` / `usage`，第 1 步拿到的四个值 |
 | `slots` | | `receiver` 模式下要探测哪些槽位，默认 `1..6` |
@@ -149,6 +149,22 @@ python tools/probe.py scan --vid 0x0951 --pid 0x1723 --cmds "21 FF 05,06 FF 05"
 | `protocol_source` | ✅ | 报文常量的出处。**必须填**，这是许可证红线的凭证 |
 | `verification` | ✅ | `verified`（上过真机）或 `unverified`（还没验证） |
 | `notes` | | 踩过的坑写在这里，后人会感谢你 |
+
+### 一台设备可能需要**两份**声明
+
+同一台设备换个连接方式，在系统眼里就是另一个 USB 设备，**PID 都不一样**，
+所以要写两份共享同一个 `name` 的声明：
+
+| 情形 | 无线 | 插线 |
+| --- | --- | --- |
+| GPW | `046D:C539` + `transport: receiver` + 配 `slots` | `046D:C088` + `transport: direct` |
+
+好消息是报文部分通常共用 —— GPW 两种模式走同一个 feature `0x1001`，第二份几乎就是
+照抄第一份，只改 PID 和 transport。
+
+这件事值得专门留意，因为它对应一个很别扭的体验问题：插上线以后，靠接收器的那条链路
+就断了，不补有线这一份的话，**鼠标会在你插线充电的一刻从托盘消失** —— 而人恰恰是
+这时候最想知道充到多少了。`devices/logitech_gpw_wired.yaml` 就是这么来的，直接抄。
 
 ### `protocol: hid++2.0` 时
 
