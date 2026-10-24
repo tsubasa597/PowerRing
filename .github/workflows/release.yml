@@ -29,14 +29,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/PowerRing | Out-Null
           Copy-Item target/release/powerring.exe dist/PowerRing/
           Copy-Item devices dist/PowerRing/devices -Recurse
-          Copy-Item README.md, README.en.md, LICENSE dist/PowerRing/
+          Copy-Item README.md, README.en.md, LICENSE, CHANGELOG.md dist/PowerRing/
           $name = "PowerRing-$($env:GITHUB_REF_NAME)-windows-x64.zip"
-          Compress-Archive -Path dist/PowerRing/* -DestinationPath $name
+          # 压缩这一层目录本身，而不是它的内容（/*）。写 /* 会让 zip 里没有
+          # 顶层目录，用户解压到「下载」就散成一地文件 ——
+          # 而且和 README 里画的目录结构对不上，照着文档找会找不到 devices
+          Compress-Archive -Path dist/PowerRing -DestinationPath $name
           Write-Host "打包完成：$name"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "产出 $name"
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          # Release 说明用 CHANGELOG，而不是 GitHub 自动生成的提交列表 ——
+          # 后者是一堆 commit 标题，对第一次点进来的人几乎没信息量
+          body_path: CHANGELOG.md
           files: PowerRing-*.zip
