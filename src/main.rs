@@ -371,8 +371,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         /// 连续读不到几次就把设备移出列表。
-        /// 取 3 而不是 1：GPW 偶尔单轮读失败，一次失败就删设备会让列表闪烁
-        const MISS_LIMIT: u8 = 3;
+        /// 不能取 1：GPW 偶尔单轮读失败，一次失败就删设备会让列表闪烁。
+        /// 但从 3 降到 2 有代价更小的办法兜住误判 —— 见 REMOVED_RECHECK，
+        /// 误删的设备 5 秒内就自己回来了。
+        const MISS_LIMIT: u8 = 2;
+        /// 有设备正在「读失败待确认」时，下一轮别等满一个周期。
+        /// 关机后要连着确认两次才算数，如果两次间隔都是 30 秒，用户要等一分钟才看到它消失。
+        /// 8 秒是折中：够让一次勉强的读取有第二次机会，又不会让确认拖太久。
+        const CONFIRM_WAIT: u64 = 8;
+        /// 刚移出设备后立刻回头看一眼：万一删错了（USB 重枚举、蓝牙闪断），
+        /// 它在这个间隔内就会重新出现，用户只看到闪一下，而不是整分钟地缺一行。
+        const REMOVED_RECHECK: u64 = 5;
+        /// 设备被移出后，它「随时可能回来」的窗口长度，以及这段时间里重扫的间隔。
+        ///
+        /// 少了这个窗口，设备重新出现只能等那次 60 秒一次的定期重扫 ——
+        /// 而轮询循环自己还要多久醒一次由 `wait` 决定，两者叠起来就是用户实测的 50 秒。
+        /// 这段时间里把轮询和重扫都压密，它重新开机会在十几秒内出现。
+        /// 到点自动恢复常规节奏：设备真的一晚上不开，也不该整夜每 10 秒扫一遍总线。
+        const RETURN_WINDOW: Duration = Duration::from_secs(180);
+        const RETURN_WAIT: u64 = 10;
         /// 隔多久重新扫一遍总线。无线设备随时可能开机，
         /// 只在「一台都没扫到」时重扫是不够的 —— 已经有一台时，后开机的那台永远进不来
         const RESCAN_EVERY: Duration = Duration::from_secs(60);
@@ -472,8 +489,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
         let mut last_scan = Instant::now();
+        // 刚有设备消失时置为中短期的截止时刻，在这之前都当它「随时会回来」
+        let mut return_until: Option<Instant> = None;
 
         loop {
+            let awaiting = return_until.map(|t| Instant::now() < t).unwrap_or(false);
             // 首轮没扫到不代表没有设备：实测上一进程被强杀后，接收器会有几秒不响应。
             // 所以只要列表是空的，每轮都重试一次，而不是一次扫不到就判死刑。
             if watched.is_empty() {
@@ -482,6 +502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for d in &fresh {
                         info!("[scan] 发现设备：{}", d.name);
                     }
+                    return_until = None; // 回来了，恢复常规重扫节奏
                     watched = fresh
                         .into_iter()
                         .map(|d| Watched {
@@ -495,15 +516,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .collect();
                 }
                 last_scan = Instant::now();
-            } else if last_scan.elapsed() >= RESCAN_EVERY {
+            } else if last_scan.elapsed()
+                >= if awaiting {
+                    Duration::from_secs(RETURN_WAIT)
+                } else {
+                    RESCAN_EVERY
+                }
+            {
                 // 定期重扫是为了接住「中途开机」的设备：接收器一直插着，
-                // 但只有耳机开了才会回应，不重扫就永远发现不了它
+                // 但只有耳机开了才会回应，不重扫就永远发现不了它。
+                // 刚有设备消失时这个周期会临时压到 RETURN_WAIT —— 用户实测
+                // 「重开 ♪ 出现」要 50 秒，就是被 60 秒的周期卡住的
                 last_scan = Instant::now();
                 for d in device::scan(&api, &profiles) {
                     if watched.iter().any(|w| w.dev.name == d.name) {
                         continue;
                     }
                     info!("[scan] 发现新设备：{}", d.name);
+                    // 它回来了，不用再按「可能有设备要回来」的密度扫总线
+                    return_until = None;
                     watched.push(Watched {
                         dev: d,
                         percent: None,
@@ -541,8 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            // 连续读不到的设备移出列表：关机了的耳机不该一直占着一行旧电量。
-            // 保留 3 次容错，避免偶尔一次读失败就让列表闪一下
+            // 连续读不到的设备移出列表：关机了的耳机不该一直占着一行旧电量
             let before = watched.len();
             watched.retain(|w| w.misses < MISS_LIMIT);
             if watched.len() != before {
@@ -552,13 +582,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
-            // 「彻底没了」的设备立即移出，不必攒够三次。
-            // 三次容错是给「暂时读不到」留的余地 —— 实测过 HID 设备会因为
-            // USB 重枚举在十秒内连着失败三次，缩短重试或去掉容错都会误伤（2026-10-23）。
-            // 而「连设备对象都构造不出来」是另一种性质的证据，不需要那么多耐心。
-            //
-            // 移出后把重扫计时拨到期：万一它只是闪断（比如蓝牙重连的一瞬间），
-            // 下一轮就能重扫并把它找回来，不会白等一分钟。
+            // 「彻底没了」的设备立即移出，不必攒够次数。
+            // 容错是给「暂时读不到」留的余地 —— 实测过 HID 设备会因为
+            // USB 重枚举连着失败（2026-10-23），所以 HID 那边要靠 misses 攒够。
+            // 而「连设备对象都构造不出来」是另一种性质的证据，不需要那份耐心。
             let before_gone = watched.len();
             watched.retain(|w| !w.dev.gone());
             if watched.len() != before_gone {
@@ -566,7 +593,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "[scan] {} 台设备已从系统消失，立即移出列表",
                     before_gone - watched.len()
                 );
+            }
+
+            // 两种移出都算「刚删过东西」：把重扫计时拨到期，并把下一轮压到 5 秒。
+            // 这样万一是误判（USB 重枚举、蓝牙闪断），它马上就被扫回来，
+            // 用户看到的是闪一下，而不是缺一行等一整分钟。
+            let removed = watched.len() != before;
+            if removed {
                 last_scan = Instant::now() - RESCAN_EVERY;
+                return_until = Some(Instant::now() + RETURN_WINDOW);
             }
             let snap = watched
                 .iter()
@@ -588,10 +623,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
             let still_pending = watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
-            let wait = if still_pending {
-                5
+            // 有设备刚读失败、还在等第二次确认：别等满一个周期，否则关机后
+            // 两次确认之间又要白等 30 秒，用户会以为程序没反应
+            let confirming = watched.iter().any(|w| w.misses > 0);
+            // 刚有设备消失：多为「先关机，过会儿再开」，这段时间把节奏压密，
+            // 让它重新出现在十几秒的量级，而不是等 60 秒的重扫周期
+            let wait: u64 = if still_pending || removed {
+                REMOVED_RECHECK
+            } else if confirming {
+                CONFIRM_WAIT
+            } else if awaiting {
+                RETURN_WAIT
             } else {
-                settings::interval()
+                settings::interval() as u64
             };
             // 睡觉改成带唤醒的等待：有人点「立即刷新」就立刻进入下一轮
             match trig_rx.recv_timeout(Duration::from_secs(wait as u64)) {
