@@ -32,10 +32,24 @@ Settings expose the refresh interval, warning and critical thresholds, the alert
 
 | Device | Interface | Reading taken from | Status |
 | --- | --- | --- | --- |
-| Logitech G PRO Wireless | receiver `046D:C539`, usage page `FF00` / usage `0002`, slots 1–6 | HID++ 2.0 `0x1001` voltage (mV → discharge curve) | Verified. 3744 mV reads as 28%, G HUB showed 29% at the same time |
+| Logitech G PRO Wireless | receiver `046D:C539`, usage page `FF00` / usage `0002`, slots 1–6 | HID++ 2.0 `0x1001` voltage (mV → discharge curve) | Verified. Within ±1% of G HUB |
 | Logitech G PRO Wireless (plugged in) | **USB cable** `046D:C088`, usage page `FF00` / usage `0002` | same `0x1001` feature | Verified. 4101 mV reads as 93%, correctly shown as charging |
-| HyperX Cloud Flight | receiver `0951:1723`, usage page `FF90` / usage `0303` | vendor report `21 FF 05` (direct mode) | Verified. Raw value 231 reads as 60% |
-| Xbox Wireless Controller (Series) | **Bluetooth**, VID `045E` / PID `0B13` | standard Battery Service `0x180F` / `0x2A19` | Verified. Device reports 17% itself |
+| HyperX Cloud Flight | receiver `0951:1723`, usage page `FF90` / usage `0303` | vendor report `21 FF 05` (direct mode) | Verified, stable and self-consistent (raw 231 reads as 60%); the vendor app shows no percentage, so there is no external reference |
+| Xbox Wireless Controller (Series) | **Bluetooth**, VID `045E` / PID `0B13` | standard Battery Service `0x180F` / `0x2A19` | Verified. Matches Windows' Bluetooth settings (checked at 93% and at 12%) |
+
+### How accurate are the numbers
+
+Short version: **anything that reports a percentage itself reads exactly what the OS reads; only devices that report voltage and get converted carry about ±1% of jitter.**
+
+| Kind | Who decides the number | Accuracy |
+| --- | --- | --- |
+| Bluetooth (Xbox controller) | the device reports a percentage | Same source and same value as Windows' Bluetooth settings. Checked at both ends of the range, identical both times |
+| Devices reporting a percentage | the device itself | Same: what it reports is what you see |
+| Voltage devices (GPW) | PowerRing converts via a discharge curve | **±1% against G HUB, and the sign flips** — 1 high near full, 1 low near empty |
+
+That ±1% is left alone deliberately: **it is not an offset you can shift away.** The sign flipping says the difference does not come from the curve sitting 1% off, but from the two sides sampling at different moments and rounding differently. Nudging a shared curve to suit one device would spoil it for every other Logitech one. If you want to settle it: let the mouse sit still for a few minutes and read both sides on the same instant.
+
+One caveat on the Cloud Flight: its `verified` **does not include "cross-checked against the vendor reading"** — HyperX's NGENUITY app does not show a percentage at all, so there is nothing to compare against. The same caveat is recorded in `devices/hyperx_cloud_flight.yaml`.
 
 The third row needs **no reverse engineering at all**: the Bluetooth SIG standardised how to read battery level, so any compliant device is read by UUID and its YAML carries not a single byte of a report. To list every such device on your machine:
 
