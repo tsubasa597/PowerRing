@@ -39,7 +39,9 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "产出 $name"
 
       - name: 创建 Release
-        uses: softprops/action-gh-release@v2
+        # v3 起跑在 Node 24 上，v2 是 Node 20（Runner 已弃用，每次跑都挂一条警告）。
+        # body_path 与 files 两个输入项在 v3 里都还在，可以平迁
+        uses: softprops/action-gh-release@v3
         with:
           # Release 说明用 CHANGELOG，而不是 GitHub 自动生成的提交列表 ——
           # 后者是一堆 commit 标题，对第一次点进来的人几乎没信息量
