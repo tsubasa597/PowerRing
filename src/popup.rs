@@ -20,15 +20,18 @@ use std::time::{Duration, Instant};
 
 use crate::ui::{self, create_font, rgb};
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse,
+    EndPaint, FillRect, GetStockObject, GetTextExtentPoint32W, InvalidateRect, SelectObject,
+    SetBkMode, SetTextColor, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HDC, NULL_PEN, PAINTSTRUCT,
+    TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, RegisterClassW, SetWindowPos,
-    ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WM_LBUTTONDOWN, WM_PAINT,
-    WM_SETTINGCHANGE, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+    WM_LBUTTONDOWN, WM_PAINT, WM_SETTINGCHANGE, WNDCLASSW, WS_BORDER, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// 卡片槽位。索引就是它们在下面各个静态数组里的下标
@@ -51,7 +54,11 @@ const BASE_PAD: f32 = 12.0;
 const BASE_TOP: f32 = 30.0;
 /// 没人管它就自己消失，避免一直挂在屏幕上。
 /// 提醒卡片短一点：它是主动冒出来的，不该长时间占着屏幕。
-const AUTO_HIDE: [Duration; N] = [Duration::from_secs(10), Duration::from_secs(8)];
+///
+/// 面板从 10 秒改成 30 秒：日志里看到用户连着七次每 11 秒点一次托盘 ——
+/// 面板刚打开就又收了，等于一直在跟它抢。30 秒跟默认轮询周期一致，
+/// 用户看一眼数字的工夫够了，也不至于忘在那儿一整天。
+const AUTO_HIDE: [Duration; N] = [Duration::from_secs(30), Duration::from_secs(8)];
 
 fn width() -> i32 {
     ui::px(BASE_WIDTH)
@@ -64,6 +71,46 @@ fn pad() -> i32 {
 }
 fn top() -> i32 {
     ui::px(BASE_TOP)
+}
+
+/// 量一段文字在卡片字号下的物理宽度。拿不到设备上下文就返回 0，
+/// 调用方会退化成最小宽度 —— 宁可窄了再夹，也不要因为测量失败画出个巨宽的框
+fn text_width(hdc: HDC, s: &str) -> i32 {
+    let w = wide(s);
+    let mut sz = SIZE::default();
+    if unsafe { GetTextExtentPoint32W(hdc, &w, &mut sz) }.as_bool() {
+        sz.cx
+    } else {
+        0
+    }
+}
+
+/// 卡片尺寸：宽度按最长的一行实测，高度按行数。
+///
+/// 早先是固定 300 宽（96 DPI）。问题在两台设备以下会剩一大片空白，
+/// 名字长的设备又可能被 `DrawTextW` 裁掉。实际量一遍再夹在 230..460 之间，
+/// 既不会空得难看，也不至于长成一个横条。
+fn layout(title: &str, texts: &[String]) -> (i32, i32) {
+    // 点直径 10 + 点与文字的间隙 6
+    let lead = ui::px(16.0);
+    let trail = ui::px(12.0);
+    let mut widest = 0;
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if !dc.is_invalid() {
+            let font = create_font(ui::font_px(9.0));
+            let old = SelectObject(dc, font.into());
+            widest = text_width(dc, title);
+            for t in texts {
+                widest = widest.max(text_width(dc, t));
+            }
+            SelectObject(dc, old);
+            let _ = DeleteObject(font.into());
+            let _ = DeleteDC(dc);
+        }
+    }
+    let w = (pad() * 2 + lead + widest + trail).clamp(ui::px(230.0), ui::px(460.0));
+    (w, top() + pad() + texts.len() as i32 * row_h())
 }
 
 // 全局状态：wndproc 必须是 extern "system" 的自由函数，拿不到闭包上下文，
@@ -169,8 +216,9 @@ pub fn alert(lines: Vec<Line>, title: &str, anchor: Option<(i32, i32, i32, i32)>
 }
 
 fn place(idx: usize, lines: Vec<Line>, icon_x: i32, icon_y: i32, icon_w: i32, icon_h: i32) {
-    let w = width();
-    let height = top() + pad() + lines.len() as i32 * row_h();
+    let title = TITLES[idx].lock().map(|g| g.clone()).unwrap_or_default();
+    let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+    let (w, height) = layout(&title, &texts);
     if let Ok(mut g) = LINES[idx].lock() {
         *g = lines
             .into_iter()
@@ -264,14 +312,29 @@ fn refresh_card(idx: usize, lines: Vec<Line>) {
     if !VISIBLE[idx].load(Ordering::SeqCst) {
         return;
     }
+    let title = TITLES[idx].lock().map(|g| g.clone()).unwrap_or_default();
+    let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+    let (w, h) = layout(&title, &texts);
     if let Ok(mut g) = LINES[idx].lock() {
         *g = lines
             .into_iter()
             .map(|l| (l.text, l.swatch))
             .collect::<Vec<_>>();
     }
+    // 行数可能变了（插拔设备），窗口尺寸得跟着走：
+    // 只重绘不改尺寸的话，少一台会留一片空行，多一台会把最后一行裁掉
     unsafe {
-        let _ = InvalidateRect(Some(hwnd(idx)), None, true);
+        let hw = hwnd(idx);
+        let _ = SetWindowPos(
+            hw,
+            None,
+            0,
+            0,
+            w,
+            h,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = InvalidateRect(Some(hw), None, true);
     }
 }
 
@@ -336,36 +399,59 @@ unsafe fn paint(hwnd: HWND, idx: usize) {
     let font = create_font(ui::font_px(9.0));
     let old = SelectObject(hdc, font.into());
 
-    // 行内垂直居中：行高 28（96 DPI 设计值），字高 12 → 上下各留 8
-    let inset = ui::px(8.0);
+    // 文字一律用 DrawTextW 的 DT_VCENTER 定位，而不是 TextOutW 的「文字左上角」：
+    // 后者要自己猜基线偏移，换个字号或换台 DPI 不同的机器就会偏高偏低。
+    // DT_VCENTER 让 GDI 按字体度量自己算，跨字号稳定。
+    // 文字左边距 = 点直径 10 + 间隙 6。留 20 的话间隙等于一个点直径，
+    // 收缩后点才像是「贴在文字左边」而不是各自飘着
+    let text_left = pad() + ui::px(16.0);
 
     // 标题
     let _ = SetTextColor(hdc, rgb(c.card_title.0, c.card_title.1, c.card_title.2));
-    let title = if let Ok(g) = TITLES[idx].lock() {
-        wide(&g)
-    } else {
-        wide("")
+    let mut title = match TITLES[idx].lock() {
+        Ok(g) => wide(&g),
+        Err(_) => wide(""),
     };
-    let _ = TextOutW(hdc, pad(), inset, &title);
+    let mut trc = RECT {
+        left: pad(),
+        top: 0,
+        right: rc.right - pad(),
+        bottom: top(),
+    };
+    // DT_NOPREFIX 不能省：DrawTextW 默认把 & 当快捷键前缀吃掉，
+    // 设备名里真有 & 时会少显示一个字。TextOutW 没有这个问题，
+    // 换成 DrawTextW 就得自己把这个行为关掉
+    let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+    let _ = DrawTextW(hdc, &mut title, &mut trc, flags);
 
     if let Ok(lines) = LINES[idx].lock() {
         for (i, (text, (r, g, b))) in lines.iter().enumerate() {
             let y = top() + i as i32 * row_h();
-            // 左侧色块：一眼看出档位，比读数字快。
-            // 高度取一行的一半，跟着字体一起缩放，和文字视觉上等重
-            let sw = CreateSolidBrush(rgb(*r, *g, *b));
-            let srect = RECT {
-                left: pad(),
-                top: y + inset,
-                right: pad() + ui::px(10.0),
-                bottom: y + row_h() - inset,
-            };
-            let _ = FillRect(hdc, &srect, sw);
-            let _ = DeleteObject(sw.into());
+
+            // 左侧状态点：颜色对应档位，比读数字快。
+            // 画圆而不是方块 —— 实心方块看着像没画完的占位符，圆点才是「状态灯」的语汇。
+            // 直径取 10（96 DPI）跟着 DPI 缩放；必须把画笔换成 NULL_PEN，
+            // 否则 DC 默认的 1px 黑边会给圆点描一圈深色轮廓
+            let d = ui::px(10.0);
+            let cx = pad() + d / 2;
+            let cy = y + row_h() / 2;
+            let dot = CreateSolidBrush(rgb(*r, *g, *b));
+            let old_brush = SelectObject(hdc, dot.into());
+            let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            let _ = Ellipse(hdc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
+            SelectObject(hdc, old_pen);
+            SelectObject(hdc, old_brush);
+            let _ = DeleteObject(dot.into());
 
             let _ = SetTextColor(hdc, rgb(c.card_text.0, c.card_text.1, c.card_text.2));
-            let w = wide(text);
-            let _ = TextOutW(hdc, pad() + ui::px(20.0), y + inset, &w);
+            let mut w = wide(text);
+            let mut lrc = RECT {
+                left: text_left,
+                top: y,
+                right: rc.right - pad(),
+                bottom: y + row_h(),
+            };
+            let _ = DrawTextW(hdc, &mut w, &mut lrc, flags);
         }
     }
 
