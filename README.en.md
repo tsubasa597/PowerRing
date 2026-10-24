@@ -8,6 +8,10 @@ Battery monitor for wireless peripherals on Windows. A ring in the tray tells yo
 - **No network, no account, no telemetry** — everything stays on your machine
 - **Adding a device = adding a YAML file**, no code changes (see [Adding a device](#adding-a-device))
 
+![Hovering the tray icon shows all three devices, lowest battery first](assets/tooltip.png)
+
+![Clicking the icon opens the battery panel: full name and level per device, with a status dot on the left](assets/panel.png)
+
 ## Features
 
 | Feature | Notes |
@@ -19,7 +23,7 @@ Battery monitor for wireless peripherals on Windows. A ring in the tray tells yo
 | Low battery alerts | Fires once when crossing a threshold, then stays quiet. Card is anchored next to the tray icon |
 | Start with Windows | Writes `HKCU\...\Run`, no elevation. A named mutex keeps a second instance from spawning a second icon |
 | Theme | Follow system / light / dark. You can force dark even when apps are light and only the taskbar is dark |
-| Auto discovery | Rescans the bus every 60 s: a device you just switched on shows up, one you switched off stops reporting stale numbers |
+| Auto discovery | Rescans the bus every 60 s: a device you switch on mid-session shows up on its own. A device you switch off drops out within tens of seconds instead of reporting stale numbers — **and for three minutes after something vanishes the pace tightens to every 10 s**, so switching it back on brings it straight back |
 | Logs | `%APPDATA%\PowerRing\log.txt`, rotates above 1 MB |
 
 Settings expose the refresh interval, warning and critical thresholds, the alert toggle (with a "Test once" button so you can verify it immediately), start-with-Windows and the theme.
