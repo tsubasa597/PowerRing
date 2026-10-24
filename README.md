@@ -51,16 +51,22 @@ Windows 无线外设电量监测。托盘里一圈电量环，一眼看清鼠标
 
 顺带说一句天箭：**它的 `verified` 不含「与厂读数对照过」这一层** —— HyperX 官方软件 NGENUITY 根本不显示具体百分比，无从对照。这一条在 `devices/hyperx_cloud_flight.yaml` 里也写明了，免得后来人以为漏做了。
 
-第三行那一类设备**不需要逆向**：蓝牙 SIG 把「读电池」定成了公开标准，只要设备照着做，
+**Xbox 手柄那一类不需要逆向**：蓝牙 SIG 把「读电池」定成了公开标准，只要设备照着做，
 按标准 UUID 读就行，声明里连一个字节的报文都不用写。想看看本机有哪些这类设备：
 
 ```bash
 cargo run --release --example ble_probe
 ```
 
-这条命令会列出本机所有带标准电池服务的蓝牙设备，每种读两遍：一遍读缓存（程序实际用的那个值），
-一遍强制实时。拿它来对照 Windows 蓝牙设置里的百分比最方便 —— 顺便说一句，页面上显示和这里
-读到的必然是同一个数。
+这条命令会列出本机所有带标准电池服务的蓝牙设备，顺带打出**每台的连接状态**，
+以及两种读法的结果：
+
+- `实时读` —— 真的往设备发一次 GATT 请求，拿当下这个值
+- `缓存读` —— 取系统缓存里那份，可能是几分钟前同步的
+
+**主程序优先走实时读**，只有在那一刻读不到时才退到缓存。拿它和系统蓝牙设置页面对照时，
+两者读的是同一份 GATT，所以数值同源；差别在于设置页面显示的是它上次同步时的值，
+设备电量刚变过的话，实时读会比它更新。
 
 设备声明在 `devices/` 下，每份 YAML 都写了 `protocol_source`（协议常量出处）与 `verification`（是否已上真机验证）。**没上过机的一律标 `unverified`，不会被当作可信数据。**
 
@@ -72,8 +78,10 @@ cargo run --release --example ble_probe
 PowerRing/
 ├─ powerring.exe
 └─ devices/
-   ├─ logitech_gpw.yaml
-   └─ hyperx_cloud_flight.yaml
+   ├─ logitech_gpw.yaml           # 无线（接收器）
+   ├─ logitech_gpw_wired.yaml     # 插线时
+   ├─ hyperx_cloud_flight.yaml
+   └─ xbox_controller.yaml
 ```
 
 > Windows 10 会把新托盘图标折叠进通知区域的 `^` 里。如果没看到，去「任务栏设置 → 通知区域 → 选择哪些图标显示在任务栏上」把它打开。
@@ -186,6 +194,14 @@ cargo build --release
   「手柄没电关机了托盘还挂着它」。取不到实时值时退回系统缓存里那份（可能陈旧），
   但不至于让正在用的设备凭空消失
 - 读不到电量时显示灰环，不会猜一个数
+
+想让更多设备被认出来，或者想改代码，从这三处进：
+
+| 想做什么 | 从哪开始 |
+| --- | --- |
+| 加一台自己的设备 | [docs/adding-a-device.md](docs/adding-a-device.md)，不用会写代码；只想提供数据也可以，Issue 模板里有位置 |
+| 改代码、提 PR | [CONTRIBUTING.md](CONTRIBUTING.md)：怎么跑起来、代码要求、PR 格式 |
+| 报告安全问题 | [SECURITY.md](SECURITY.md)：走 GitHub Security Advisory 私下说，别开公开 Issue |
 
 ## 许可证红线
 

@@ -51,11 +51,18 @@ That ±1% is left alone deliberately: **it is not an offset you can shift away.*
 
 One caveat on the Cloud Flight: its `verified` **does not include "cross-checked against the vendor reading"** — HyperX's NGENUITY app does not show a percentage at all, so there is nothing to compare against. The same caveat is recorded in `devices/hyperx_cloud_flight.yaml`.
 
-The third row needs **no reverse engineering at all**: the Bluetooth SIG standardised how to read battery level, so any compliant device is read by UUID and its YAML carries not a single byte of a report. To list every such device on your machine:
+The **Xbox controller row** needs no reverse engineering at all: the Bluetooth SIG standardised how to read battery level, so any compliant device is read by UUID and its YAML carries not a single byte of a report. To list every such device on your machine:
 
 ```bash
 cargo run --release --example ble_probe
 ```
+
+It lists every Bluetooth device on your machine exposing the standard battery service, prints each one's **connection state**, and reads it two ways (the labels it prints are Chinese — `实时读` is the fresh read, `缓存读` the cached one):
+
+- **fresh** — actually sends a GATT request to the device and reads it now
+- **cached** — takes what the OS cached, possibly synced minutes ago
+
+**The app prefers the fresh read** and only falls back to the cached one when the read fails at that instant. Comparing it against Windows' Bluetooth settings: both read the same GATT value, so they agree on substance; the difference is that the Settings page shows whatever it last synced, so the fresh read is newer whenever the level just changed.
 
 Device declarations live in `devices/`. Every YAML carries `protocol_source` (where the constants came from) and `verification`. **Anything not tested on real hardware is marked `unverified`.**
 
@@ -67,8 +74,10 @@ Download the zip from Releases, extract it anywhere (e.g. `C:\Tools\PowerRing`) 
 PowerRing/
 ├─ powerring.exe
 └─ devices/
-   ├─ logitech_gpw.yaml
-   └─ hyperx_cloud_flight.yaml
+   ├─ logitech_gpw.yaml           # wireless (over the receiver)
+   ├─ logitech_gpw_wired.yaml     # while plugged in
+   ├─ hyperx_cloud_flight.yaml
+   └─ xbox_controller.yaml
 ```
 
 > Windows 10 hides new tray icons inside the `^` overflow. If you don't see it, go to Taskbar settings → Notification area → Select which icons appear on the taskbar.
@@ -178,6 +187,14 @@ Output: `target/release/powerring.exe` (~0.9 MB).
 - Bluetooth Battery Level carries a single percentage byte with **no charging flag**, so these devices never show as charging
 - **Bluetooth devices enter and leave the list by whether they are connected right now**: drop the link and they fall off, reconnect and they come back. A powered-off controller no longer sits in the tray forever. When a live read fails we fall back to the system cache (possibly stale) rather than dropping a device that is in use
 - When a reading fails the ring turns grey instead of guessing
+
+Three doors if you want more devices recognised, or want to change the code:
+
+| Goal | Start here |
+| --- | --- |
+| Add your own device | [docs/adding-a-device.md](docs/adding-a-device.md) — no coding required; supplying data alone is a contribution too, the issue template has a slot for it |
+| Change code, open a PR | [CONTRIBUTING.md](CONTRIBUTING.md): how to run it, code requirements, PR format |
+| Report a security problem | [SECURITY.md](SECURITY.md): use GitHub Security Advisory, not a public issue |
 
 ## License boundary
 
