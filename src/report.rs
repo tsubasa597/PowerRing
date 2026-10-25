@@ -283,6 +283,8 @@ mod tests {
     fn 报表自带隐私提示与分段() {
         let Ok(api) = HidApi::new() else { return };
         let text = build(&api, &[]);
+        // 带 --nocapture 跑时能看到真实报表长什么样，排查用户发来的那份时很有用
+        eprintln!("{text}");
         assert!(text.contains("不含序列号"), "开头要有隐私说明");
         assert!(text.contains("【当前显示的设备】"));
         assert!(text.contains("（一台都没有）"), "没有设备时要说明白");
