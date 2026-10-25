@@ -93,7 +93,7 @@ fn appdata_dir() -> PathBuf {
 }
 
 /// 当前本地时间，固定东八区。不引 chrono，自己算日历。
-fn stamp() -> String {
+pub fn stamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

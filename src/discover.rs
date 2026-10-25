@@ -24,7 +24,7 @@ use crate::{info, warn};
 /// 会答 HID++ 的厂商。HID++ 是罗技的协议，只对它家设备发这类报文 ——
 /// 对着别人的设备乱发私有请求，轻则没反应，重则把正在休眠的设备叫醒。
 /// 这条清单只增不减：加一个厂商意味着确认它真的实现了 HID++ 2.0。
-const HIDPP_VENDORS: [u16; 1] = [0x046D];
+pub(crate) const HIDPP_VENDORS: [u16; 1] = [0x046D];
 
 /// 候选电量 feature，按「老设备多、新设备准」排序：
 /// 0x1001 电压式（罗技老设备普遍支持，读出来是毫伏，走共用放电曲线换算）
@@ -37,7 +37,7 @@ const BATTERY_FEATURES: [(u16, BatteryKind); 2] = [
 
 /// 直连设备（插线、或接收器已与设备配对成一台）用的 device index。
 /// M2 实测：直连时不挑 index，0x00–0xFF 全都响应，用 1 即可。
-const DIRECT_IDX: u8 = 1;
+pub(crate) const DIRECT_IDX: u8 = 1;
 /// 用来分辨接收器与直连设备的那个 index：故意取一个不是 1 的值，
 /// 只有「不挑 index 的直连设备」才会理它（见 `looks_direct`）
 const PROBE_IDX: u8 = 2;
@@ -70,7 +70,7 @@ fn read_battery(conn: &Hidpp, idx: u8, feature: u16, kind: BatteryKind) -> Optio
 }
 
 /// 试认这台设备走的是不是「直连的 HID++ 设备」
-fn try_direct(conn: &Hidpp) -> Option<(u16, BatteryKind)> {
+pub(crate) fn try_direct(conn: &Hidpp) -> Option<(u16, BatteryKind)> {
     for (feat, kind) in BATTERY_FEATURES {
         // feature_index 问的是「你支持这个 feature 吗」，答了才算候选
         if conn.feature_index(DIRECT_IDX, feat).is_none() {
@@ -86,7 +86,7 @@ fn try_direct(conn: &Hidpp) -> Option<(u16, BatteryKind)> {
 }
 
 /// 试认这个接口是不是「接收器」，上面挂着几台设备
-fn try_receiver(conn: &Hidpp) -> Option<(u8, u16, BatteryKind)> {
+pub(crate) fn try_receiver(conn: &Hidpp) -> Option<(u8, u16, BatteryKind)> {
     for slot in RECEIVER_SLOTS {
         for (feat, kind) in BATTERY_FEATURES {
             if conn.feature_index(slot, feat).is_none() {
@@ -111,7 +111,7 @@ fn try_receiver(conn: &Hidpp) -> Option<(u8, u16, BatteryKind)> {
 /// 分错的代价并不对称：接收器被当成直连，就只按 index 1 读 —— 设备漂到别的 slot
 /// 就再也读不到（实测 GPW 的 slot 会漂）；直连被当成接收器，只是多问几个空 slot，
 /// 慢一点但结果一样。所以拿不准时宁可判成接收器。
-fn looks_direct(conn: &Hidpp) -> bool {
+pub(crate) fn looks_direct(conn: &Hidpp) -> bool {
     BATTERY_FEATURES
         .iter()
         .any(|(f, _)| conn.feature_index(PROBE_IDX, *f).is_some())
@@ -121,7 +121,7 @@ fn looks_direct(conn: &Hidpp) -> bool {
 ///
 /// 接收器的 USB 产品串一律叫 "USB Receiver"，用户在意的是挂在它上面的那台鼠标叫什麼。
 /// 设备名走 HID++ 的 device name feature（0x0005），读不到才退回产品串。
-fn best_name(conn: &Hidpp, idx: u8, fallback: String) -> String {
+pub(crate) fn best_name(conn: &Hidpp, idx: u8, fallback: String) -> String {
     match conn.device_name(idx) {
         Some(n) if !n.is_empty() => n,
         _ => fallback,

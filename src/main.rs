@@ -24,6 +24,7 @@ mod log;
 mod popup;
 mod profile;
 mod raw;
+mod report;
 mod settings;
 mod theme;
 mod ui;
@@ -373,6 +374,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 「立即刷新」用的唤醒通道：轮询线程平时睡在 recv_timeout 上，收到信号就提前醒。
     // 没有它，「刷新」菜单项就得干等下一轮轮询（60 秒），点了跟没点一样。
     let (trig_tx, trig_rx) = mpsc::channel::<()>();
+    // 「导出设备信息」：菜单线程只发一个信号，真正生成报表的是轮询线程 ——
+    // 报表要枚举 HID 并试探 HID++，而 HidApi 只能在轮询线程里用（Device 不是 Send）。
+    // 生成完的文本走 report_tx 回主线程，由主线程写剪贴板（剪贴板要在有窗口的线程上开）
+    let (export_tx, export_rx) = mpsc::channel::<()>();
+    let (report_tx, report_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
         struct Watched {
             dev: device::Device,
@@ -745,6 +751,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if alert_tx.send(alerts).is_err() {
                 break;
             }
+            // 有人点了「导出设备信息」：报表必须在这一侧生成（HidApi 在这儿），
+            // 生成完立刻交回主线程，让它去写剪贴板
+            if export_rx.try_recv().is_ok() {
+                // 连点会攒下多个信号，排空，免得连着生成好几份
+                while export_rx.try_recv().is_ok() {}
+                let known = watched
+                    .iter()
+                    .map(|w| crate::report::Known {
+                        name: w.dev.name.clone(),
+                        percent: if w.offline { None } else { w.percent },
+                        charging: w.charging && !w.offline,
+                    })
+                    .collect::<Vec<_>>();
+                info!("[report] 生成设备信息报表（当前 {} 台设备）", known.len());
+                if report_tx.send(crate::report::build(&api, &known)).is_err() {
+                    break;
+                }
+            }
             // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
@@ -788,10 +812,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open_panel = MenuItem::new("显示电量面板", true, None);
     let refresh = MenuItem::new("立即刷新", true, None);
     let open_settings = MenuItem::new("设置…", true, None);
+    // 认不出的设备只能靠用户报过来：这一步把「本机有什么」变成一段可直接粘贴的文本。
+    // 放在菜单里而不是藏进设置窗口 —— 它只在「设备没被认出来」时才用得上，
+    // 而那种时候用户不会想到去翻设置
+    let export = MenuItem::new("导出设备信息…", true, None);
     let quit = MenuItem::new("退出 PowerRing", true, None);
     menu.append(&open_panel)?;
     menu.append(&refresh)?;
     menu.append(&open_settings)?;
+    menu.append(&export)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
@@ -802,11 +831,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let panel_id = open_panel.id().clone();
     let refresh_id = refresh.id().clone();
     let settings_id = open_settings.id().clone();
+    let export_id = export.id().clone();
     let quit_id = quit.id().clone();
     let flag = quitting.clone();
     let req = panel_requested.clone();
     let sreq = settings_requested.clone();
     let trigger = trig_tx.clone();
+    let exp = export_tx.clone();
     // MenuEvent 只有在消息泵跑起来之后才会产生，所以这里只是「接」，不是「驱动」
     thread::spawn(move || {
         for ev in MenuEvent::receiver().iter() {
@@ -816,6 +847,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = trigger.send(());
             } else if ev.id() == &settings_id {
                 sreq.store(true, Ordering::SeqCst);
+            } else if ev.id() == &export_id {
+                let _ = exp.send(());
             } else if ev.id() == &quit_id {
                 info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
@@ -838,6 +871,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("POWERRING_OPEN_SETTINGS").is_ok() {
         settings::open();
     }
+    // 同类开关：设了就开机导出一次设备信息。右键菜单没法在无人值守时点，
+    // 这个开关让「导出」这条链路能被自动验证，也能用来排查用户报上来的那台机器
+    if std::env::var("POWERRING_EXPORT_REPORT").is_ok() {
+        let _ = export_tx.send(());
+    }
 
     info!(
         "[tray] 托盘已就绪，每 {} 秒刷新一次（消息泵已启动）",
@@ -849,6 +887,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 盯着配色有没有变，变了要重画托盘图标（见主循环里的注释）
     let mut seen_dark = theme::is_dark();
     let rx: Receiver<Vec<Status>> = rx;
+    let report_rx: Receiver<String> = report_rx;
     while !quitting.load(Ordering::SeqCst) {
         unsafe { pump_messages() };
 
@@ -914,6 +953,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 「设置…」同理：窗口必须和消息泵同线程，打开动作也留在这里
         if settings_requested.swap(false, Ordering::SeqCst) {
             settings::open();
+        }
+
+        // 「导出设备信息…」：轮询线程生成好文本送回来，这里负责放进剪贴板。
+        // 必须给反馈 —— 用户点了没动静，只会以为程序坏了
+        if let Ok(text) = report_rx.try_recv() {
+            let lines = match report::copy(&text) {
+                Ok(()) => vec![
+                    Line {
+                        text: "设备信息已复制到剪贴板".to_string(),
+                        // 颜色沿用环色那一套，不在这里另写一套配色
+                        swatch: color_of(100, false),
+                    },
+                    Line {
+                        text: "粘贴给维护者就能申请适配".to_string(),
+                        swatch: (150, 150, 150),
+                    },
+                ],
+                Err(e) => {
+                    warn!("[report] 写剪贴板失败：{e}");
+                    // 退路：剪贴板被别的程序占着是常有的事，至少把文件留下
+                    let where_ = match report::write_file(&text) {
+                        Ok(p) => format!("已存到 {}", p.display()),
+                        Err(e2) => format!("文件也没存下：{e2}"),
+                    };
+                    vec![
+                        Line {
+                            text: "剪贴板用不了".to_string(),
+                            swatch: color_of(5, false),
+                        },
+                        Line {
+                            text: where_,
+                            swatch: (150, 150, 150),
+                        },
+                    ]
+                }
+            };
+            info!("[report] 已导出设备信息");
+            popup::alert(lines, "导出设备信息", icon_rect(&tray));
         }
 
         // 设置窗口里的「试一次」：提醒本来只在跌破阈值时发生，鼠标不会说低就低，

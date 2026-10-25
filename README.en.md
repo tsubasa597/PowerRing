@@ -207,6 +207,14 @@ Two rules who anyone touching this code should keep: **only send HID++ reports t
 
 What genuinely cannot be recognised (vendor-private protocols, the HyperX Cloud Flight among them) needs a human: either a public source or your own packet capture. That path starts at [docs/adding-a-device.md](docs/adding-a-device.md).
 
+### When it is not recognised: export device info
+
+**Right-click the tray icon → Export device info…** and a plain-text report lands on your clipboard. Paste it into a [device request issue](https://github.com/vkeyzhen/PowerRing/issues/new?template=device-request.yml), or send it to whoever maintains your copy — GitHub is not required, the report just has to reach a human.
+
+It has three sections: what the app is currently showing, which Bluetooth devices expose the standard battery service, and the VID:PID plus usage of every USB HID interface on the machine. That is enough to decide whether a device can be added and how.
+
+Three privacy limits are hard-coded: **no serial numbers** (unique per device), **no interface paths** (they carry a machine-specific session id), **no Bluetooth addresses**. Device names are included because that is how a model is identified — so glance over yours before pasting in case it holds a nickname.
+
 Three doors if you want more devices recognised, or want to change the code:
 
 | Goal | Start here |

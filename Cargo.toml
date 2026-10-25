@@ -37,6 +37,10 @@ features = [
     "Devices_Enumeration",
     "Foundation",
     "Storage_Streams",
+    # 设备信息导出：把报表写进剪贴板（CF_UNICODETEXT + 全局内存）
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先

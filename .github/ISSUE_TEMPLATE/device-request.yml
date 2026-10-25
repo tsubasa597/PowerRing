@@ -1,0 +1,81 @@
+name: 请求支持我的设备
+description: 托盘里看不到你的设备，或者显示了但读数不对
+title: "[设备] "
+labels: ["device"]
+body:
+  - type: markdown
+    value: |
+      **先做这一步**：右键托盘图标 → **导出设备信息…** → 会复制一段文本到剪贴板，
+      直接粘贴到下面「设备信息」那个框里。
+
+      那段文本里**不含序列号、接口路径、蓝牙地址** —— 但设备名是有的（型号靠它认），
+      如果你的设备名里带了昵称，粘贴后自己删一下。
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备型号
+      description: 写你在包装盒或官方软件里看到的那个名字
+      placeholder: HyperX Cloud III S Wireless
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: 它是怎么连到电脑上的
+      description: >
+        同一台设备换一种接法，VID/PID 可能就变了 —— 比如无线鼠标插上线，
+        在系统里是另外一个设备。所以这一项很重要
+      options:
+        - 无线接收器（一个 USB 小接收器）
+        - 蓝牙
+        - USB 线（有线连接）
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: 设备信息
+      description: 右键托盘 → 「导出设备信息…」，把复制到的内容整段粘贴过来
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: official
+    attributes:
+      label: 官方软件显示多少电量
+      description: >
+        如果你装了厂商的驱动软件（Logitech G HUB、雷蛇雷云、HyperX NGENUITY 之类），
+        把同一时刻它显示的百分比写上。有这个数字，我们才知道程序读得准不准；
+        不显示具体数值的话写「不显示」就行
+      placeholder: G HUB 显示 87%
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充
+      description: 比如设备有几个可以连的口、官方软件叫什么、有没有现成的公开资料
+    validations:
+      required: false
+
+  - type: input
+    id: contact
+    attributes:
+      label: 联系方式（选填）
+      description: 想等结果的就留一个，不想留也能提交 —— 处理完会在 Issue 里回复
+    validations:
+      required: false
+
+  - type: markdown
+    value: |
+      ---
+
+      **接下来会发生什么**：我们按这段信息写一份设备声明，合并进项目后，
+      下个版本的 Release 里就自带它了。如果设备的通信协议是私有的、
+      找不到公开资料，这件事可能会卡住 —— 那种情况会在 Issue 里说明白。
