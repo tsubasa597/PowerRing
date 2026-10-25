@@ -26,6 +26,8 @@ Battery monitor for wireless peripherals on Windows. A ring in the tray tells yo
 | Auto discovery | Rescans the bus every 60 s: a device you switch on mid-session shows up on its own — **and for three minutes after something vanishes the pace tightens to every 10 s**, so switching it back on brings it straight back. A device that stops answering is marked *disconnected* and stays in the tray: it never reports a stale number, but it also does not disappear just because it dozed off |
 | Logs | `%APPDATA%\PowerRing\log.txt`, rotates above 1 MB |
 
+PowerRing asks each device once per poll interval (30 s by default), so **any change shows up at most one round later**: unplug a receiver and it drops off the tray within roughly 10–30 s, plug it back in and it returns on the next scan. That is deliberate — probing more often just to notice sooner wakes sleeping devices, which spends the battery we are trying to report on.
+
 Settings expose the refresh interval, warning and critical thresholds, the alert toggle (with a "Test once" button so you can verify it immediately), start-with-Windows and the theme.
 
 ## Verified devices
