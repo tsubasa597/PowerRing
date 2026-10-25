@@ -293,15 +293,155 @@ impl Raw {
 /// 只认一边，另一边必然失效，表现是「托盘起来了但一台设备都扫不到」。
 /// 所以按 exe 所在目录往上找，找不着再退回工作目录。
 pub fn load() -> Vec<Profile> {
+    let mut all = Vec::new();
+    let mut any_dir = false;
     for base in candidate_bases() {
         let d = base.join("devices");
         if d.is_dir() {
+            any_dir = true;
             info!("[profile] 设备声明目录：{:?}", d);
-            return load_from(&d);
+            all.extend(load_from(&d));
         }
     }
-    warn!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
-    Vec::new()
+    if !any_dir {
+        warn!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
+        return Vec::new();
+    }
+    // 同一个设备可能被两个目录同时声明：内置名单里有的，后来自动发现又写了一份到用户目录。
+    // 以**先加载到的为准**（exe 旁的在前，也就是内置优先），后到的整份跳过 ——
+    // 留两份会让同一台设备在面板里出现两行。
+    let mut out: Vec<Profile> = Vec::new();
+    for p in all {
+        let dup = out
+            .iter()
+            .any(|q| q.vid == p.vid && q.pid == p.pid && q.protocol == p.protocol);
+        if dup {
+            info!(
+                "[profile] {} 已在前面的目录里声明过，跳过重复的一份",
+                p.name
+            );
+            continue;
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// 自动发现到的设备落到用户目录，下次启动直接命中，不必再探测一遍。
+///
+/// 写在 `%APPDATA%\PowerRing\devices` 而不是 exe 旁边：程序可能装在 Program Files，
+/// 那边不一定有写权限；而这份东西本来就是「这台机器上认出来的」，跟着用户走更合适。
+///
+/// 文件名带 VID/PID，一台一个文件，方便用户整份贴给我 —— 贴过来就是能直接合并的声明。
+/// 已存在的同名文件**不覆盖**：用户可能改过名字、调过字段，自动发现不该把他的改动冲掉。
+pub fn save_discovered(list: &[Profile]) -> usize {
+    let Some(dir) = user_devices_dir() else {
+        return 0;
+    };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        warn!("[profile] 建不了用户声明目录 {:?}：{e}", dir);
+        return 0;
+    }
+    let mut n = 0;
+    for p in list {
+        let path = dir.join(format!("auto-{:04X}-{:04X}.yaml", p.vid, p.pid));
+        if path.exists() {
+            continue;
+        }
+        match fs::write(&path, to_yaml(p)) {
+            Ok(()) => {
+                info!("[profile] 记下新设备 {:?}", path);
+                n += 1;
+            }
+            Err(e) => warn!("[profile] 写不进 {:?}：{e}", path),
+        }
+    }
+    n
+}
+
+/// 用户目录：%APPDATA%\PowerRing\devices
+fn user_devices_dir() -> Option<PathBuf> {
+    let app = std::env::var("APPDATA").ok()?;
+    if app.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(app).join("PowerRing").join("devices"))
+}
+
+/// 把一份声明写成 YAML 文本。
+///
+/// 手写而不走 serde 是有意的：文件里要带上「这是自动生成的、可以删」的说明，
+/// 序列化出来的东西没法夹带这些话，而恰恰是这些话决定了用户敢不敢动手改。
+fn to_yaml(p: &Profile) -> String {
+    let name = yaml_string(&p.name);
+    let protocol = match p.protocol {
+        Protocol::Hidpp20 => "hid++2.0",
+        Protocol::Ble => "ble",
+        Protocol::Raw => "raw",
+    };
+    let transport = match p.transport {
+        Transport::Receiver => "receiver",
+        Transport::Direct => "direct",
+    };
+    let kind = match p.battery_kind {
+        BatteryKind::Voltage => "voltage",
+        BatteryKind::Percent => "percent",
+    };
+    let mut s = String::new();
+    s.push_str("# 由 PowerRing 自动发现生成：这台设备不在内置名单里，\n");
+    s.push_str("# 程序用公开标准探测到它能报电量，于是记在这里。\n");
+    s.push_str("# 这个文件可以随便删，删了下次启动会重新探测一遍。\n");
+    s.push_str("# 想让更多人用上它，把这个文件的内容贴到项目的 Issue 里就行。\n\n");
+    s.push_str(&format!("name: {name}\n"));
+    s.push_str(&format!("protocol: {protocol}\n"));
+    s.push_str(&format!("transport: {transport}\n"));
+    s.push_str("match:\n");
+    s.push_str(&format!("  vendor_id: \"0x{:04X}\"\n", p.vid));
+    s.push_str(&format!("  product_id: \"0x{:04X}\"\n", p.pid));
+    if p.protocol == Protocol::Hidpp20 {
+        let slots = p
+            .slots
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("slots: [{slots}]\n"));
+    }
+    s.push_str("battery:\n");
+    if let Some(f) = p.battery_feature {
+        s.push_str(&format!("  feature: \"0x{f:04X}\"\n"));
+    }
+    s.push_str(&format!("  kind: {kind}\n"));
+    // 这两个字段的值已经是「带引号的字符串」，别再套一层引号 ——
+    // 套两层会让 YAML 解析出一个以引号开头的怪值，而且解析失败是静默跳过的，
+    // 用户只会看到这台设备不见了，很难联想到是这里多写了一对引号
+    s.push_str(&format!(
+        "protocol_source: {}\n",
+        yaml_string(&p.protocol_source)
+    ));
+    s.push_str(&format!("verification: {}\n", yaml_string(&p.verification)));
+    if let Some(nf) = p.name_feature {
+        s.push_str("identify:\n");
+        s.push_str(&format!("  name_feature: \"0x{nf:04X}\"\n"));
+    }
+    s
+}
+
+/// YAML 双引号字符串：引号、反斜杠和控制字符都得处理，
+/// 否则设备名里一个引号就能让整份声明解析失败 —— 而声明解析失败是静默跳过的，
+/// 用户只会看到「这台设备没了」，很难联想到是自己名字里的引号惹的祸。
+fn yaml_string(s: &str) -> String {
+    let esc: String = s
+        .chars()
+        .map(|c| match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' | '\r' | '\t' => ' '.to_string(),
+            c if c.is_control() => String::new(),
+            c => c.to_string(),
+        })
+        .collect();
+    format!("\"{esc}\"")
 }
 
 /// 从 exe 所在目录开始，逐级向上找 devices；最后是工作目录与 %APPDATA%
@@ -331,6 +471,11 @@ fn candidate_bases() -> Vec<PathBuf> {
     if let Ok(app) = std::env::var("APPDATA") {
         out.push(PathBuf::from(app).join("PowerRing"));
     }
+    // 同一个目录可能从两条路被推进来（从 exe 往上找会经过它，当前工作目录也可能正好是它）。
+    // 不去重的话同一份声明会被读两遍，后面的靠去重挡住，日志里平白多出几行
+    // 「已在前面的目录里声明过」，看起来像用户多了几份重复声明。
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
     out
 }
 

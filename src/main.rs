@@ -18,6 +18,7 @@ mod autostart;
 mod ble;
 mod config;
 mod device;
+mod discover;
 mod hidpp;
 mod log;
 mod popup;
@@ -39,6 +40,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use crate::config::Config;
 use crate::popup::Line;
+use crate::profile::Profile;
 
 /// 轮询线程交给主线程的一次快照
 struct Status {
@@ -413,6 +415,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// 隔多久重新扫一遍总线。无线设备随时可能开机，
         /// 只在「一台都没扫到」时重扫是不够的 —— 已经有一台时，后开机的那台永远进不来
         const RESCAN_EVERY: Duration = Duration::from_secs(60);
+        /// 隔多久再试一次「自动发现」—— 认那些没写进声明的设备。
+        ///
+        /// 只在**一台设备都没有**时才重试。探测要真的发报文，会把睡着的设备叫醒；
+        /// 列表非空就说明已经有设备在用，这时候不该为了「万一还有一台」去打扰它们。
+        /// 启动时那一次是例外（见下面的 force）：新买的设备插上就该被认出来。
+        const DISCOVER_EVERY: Duration = Duration::from_secs(60);
 
         /// 判断这台设备是不是刚跌破阈值，并把弹药状态推进一轮。
         ///
@@ -484,6 +492,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             out
         }
+        /// 试一次自动发现：把「没写进声明、但能用公开标准读到电量」的设备认出来。
+        ///
+        /// 认出来的会写进用户目录变成一份真声明，下次启动直接命中，不必再探测。
+        /// `force` 只用于启动第一轮 —— 那时还没任何设备，认一遍最值。
+        fn run_discover(
+            api: &HidApi,
+            profiles: &mut Vec<Profile>,
+            last: &mut Instant,
+            force: bool,
+        ) {
+            if !force && last.elapsed() < DISCOVER_EVERY {
+                return;
+            }
+            *last = Instant::now();
+            let found = crate::discover::find(api, profiles);
+            if found.is_empty() {
+                return;
+            }
+            let saved = crate::profile::save_discovered(&found);
+            info!(
+                "[discover] 认出 {} 台没写进声明的设备，写下 {} 份声明",
+                found.len(),
+                saved
+            );
+            profiles.extend(found);
+        }
+
+        let mut profiles = profiles;
         let api = match HidApi::new() {
             Ok(a) => a,
             Err(e) => {
@@ -491,6 +527,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         };
+        // 自动发现：启动第一轮无条件试一次。设备是插着开机的，
+        // 这时候认出来，用户第一次打开就不是空壳
+        let mut last_discover = Instant::now();
+        run_discover(&api, &mut profiles, &mut last_discover, true);
         let devices = device::scan(&api, &profiles);
         for d in &devices {
             info!("[scan] 发现设备：{}", d.name);
@@ -519,6 +559,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 首轮没扫到不代表没有设备：实测上一进程被强杀后，接收器会有几秒不响应。
             // 所以只要列表是空的，每轮都重试一次，而不是一次扫不到就判死刑。
             if watched.is_empty() {
+                // 一台都没有，先想想是不是压根没被任何声明覆盖：
+                // 也许是新买的设备刚插上，也许是它开机晚了一步。
+                // 再认一次（频率由 run_discover 自己把着，不会每轮都发报文）
+                run_discover(&api, &mut profiles, &mut last_discover, false);
                 let fresh = device::scan(&api, &profiles);
                 if !fresh.is_empty() {
                     for d in &fresh {

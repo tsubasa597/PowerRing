@@ -192,6 +192,21 @@ Output: `target/release/powerring.exe` (~0.9 MB).
 - **Bluetooth devices enter and leave the list by whether they are connected right now**: drop the link and they fall off, reconnect and they come back. A powered-off controller no longer sits in the tray forever. When a live read fails we fall back to the system cache (possibly stale) rather than dropping a device that is in use
 - When a reading fails the ring turns grey instead of guessing
 
+## Your device is not in that table
+
+Do not reach for the YAML template just yet — the app tries to recognise it on its own. Both of these paths are public standards, so nothing needs reversing:
+
+| Your device | How it gets recognised |
+| --- | --- |
+| Bluetooth (controllers, some keyboards and headsets) | Anything exposing the standard Battery Service (`0x180F`) is readable, and the percentage is **reported by the device itself** |
+| Logitech (mice, keyboards; receiver or cable) | We ask whether it supports a battery feature (`0x1001` voltage, `0x1004` unified). It counts only if the device answers **and we actually read one plausible value** |
+
+Anything recognised is written out as a **standard YAML declaration** under `%APPDATA%\PowerRing\devices`, so the next launch hits it directly instead of probing again. You can delete that file (it will be re-discovered next time) or paste it straight into an issue — it is already a declaration that can be merged as-is.
+
+Two rules who anyone touching this code should keep: **only send HID++ reports to Logitech devices** (it is their protocol; firing vendor-private requests at someone else's hardware wakes sleeping devices), and **only probe on the first round after launch and while no device has been found** — once something is in use, leave it alone.
+
+What genuinely cannot be recognised (vendor-private protocols, the HyperX Cloud Flight among them) needs a human: either a public source or your own packet capture. That path starts at [docs/adding-a-device.md](docs/adding-a-device.md).
+
 Three doors if you want more devices recognised, or want to change the code:
 
 | Goal | Start here |
