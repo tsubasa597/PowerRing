@@ -3,7 +3,11 @@
 本项目的所有值得记录的改动都写在这里。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.2.0] — 2026-10-25
+
+主题：**让第一次打开的人不是空壳，并且设备能越用越多**。
+以前内置名单里没有的设备一律不显示，陌生人打开就是个空托盘；现在程序会自己认，
+认不出来的还能一键把本机情况交出来。
 
 ### 新增
 
@@ -139,3 +143,4 @@ release 产物约 930 KB（验收线 5 MB）。release profile 用的是 `opt-le
 
 [0.1.0]: https://github.com/vkeyzhen/PowerRing/releases/tag/v0.1.0
 [0.1.1]: https://github.com/vkeyzhen/PowerRing/releases/tag/v0.1.1
+[0.2.0]: https://github.com/vkeyzhen/PowerRing/releases/tag/v0.2.0
