@@ -104,6 +104,25 @@ impl Hidpp {
         }
     }
 
+    /// 这个 USB 接口在系统上还在不在。
+    ///
+    /// 判据是**写不写得进去**，不是「有没有回答」—— 这两件事必须分开看：
+    /// 接收器插着、鼠标睡着时，写入照样成功，只是没人应答；
+    /// 写不进去只可能是那个接口已经不在了（接收器被拔掉、线被拔掉）。
+    /// `request()` 把两者合并成一个 `None`，于是「睡着的鼠标」会被当成
+    /// 「设备没了」而从托盘消失 —— 2026-10-25 实测到的就是这条。
+    ///
+    /// 报文用一条合法的 getFeature（问 0xFF 有没有设备名 feature），没有副作用。
+    /// 直连设备也认 0xFF（M2 实测：0x00/0x01/0x02/0x03/0xFF 全响应），所以两种
+    /// 连接方式都能用同一条判据。
+    pub fn attached(&self) -> bool {
+        let req = [0x11u8, 0xFF, 0x00, 0x0D, 0x00, 0x05];
+        let mut out = vec![0u8; 20];
+        out[..req.len()].copy_from_slice(&req);
+        // 不等应答：只关心写入本身成不成。遗留的包会被下一次 request() 排空
+        self.dev.write(&out).is_ok()
+    }
+
     /// 查询某个 feature 在设备上的 index；返回 None 表示不支持。
     /// 注意：不能用 ping 判断 slot 是否有设备（M0 实测不可靠），改用 feature 查询。
     pub fn feature_index(&self, dev_idx: u8, feature: u16) -> Option<u8> {

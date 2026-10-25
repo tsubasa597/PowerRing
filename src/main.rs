@@ -47,6 +47,9 @@ struct Status {
     short: String,
     percent: Option<u8>,
     charging: bool,
+    /// 联系不上，但承载它的接收器还在机器上 —— 多半是休眠或关机。
+    /// 显示为「未连接」而不是把设备删掉：删了的话鼠标每次睡深一点都要重新出现一次
+    offline: bool,
 }
 
 /// 一次低电量提醒。是「事件」不是「状态」—— 一轮轮询最多产生一次
@@ -153,9 +156,11 @@ fn tooltip_of(list: &[Status]) -> String {
         return tip_line(&list[0], &list[0].name);
     }
 
-    // 电量低的排前面：悬停最可能想看的就是「哪台该充电了」。读不到电量的排最后
+    // 电量低的排前面：悬停最可能想看的就是「哪台该充电了」。
+    // 读不到电量的排最后，未连接的排在它们之后 —— 它是已知的「不在线」，
+    // 不该跟「在线但读不到」混在一起
     let mut sorted: Vec<&Status> = list.iter().collect();
-    sorted.sort_by_key(|s| s.percent.unwrap_or(u8::MAX));
+    sorted.sort_by_key(|s| (s.offline, s.percent.unwrap_or(u8::MAX)));
 
     let mut parts: Vec<String> = sorted
         .iter()
@@ -173,6 +178,11 @@ fn tooltip_of(list: &[Status]) -> String {
 }
 
 fn tip_line(s: &Status, name: &str) -> String {
+    if s.offline {
+        // 说「未连接」而不是给个数：那个数是它睡着之前读到的，
+        // 摆出来像现在还是这么多，而它其实可能已经充了一夜
+        return format!("{}（未连接）", name);
+    }
     match s.percent {
         Some(p) => format!("{} {}%{}", name, p, if s.charging { " 充电" } else { "" }),
         None => format!("{} --", name),
@@ -190,14 +200,18 @@ fn popup_lines(list: &[Status]) -> Vec<Line> {
     }
     list.iter()
         .map(|s| Line {
-            text: match s.percent {
-                Some(p) => format!(
-                    "{}  {}%{}",
-                    s.name,
-                    p,
-                    if s.charging { "  充电中" } else { "" }
-                ),
-                None => format!("{}  --", s.name),
+            text: if s.offline {
+                format!("{}  未连接", s.name)
+            } else {
+                match s.percent {
+                    Some(p) => format!(
+                        "{}  {}%{}",
+                        s.name,
+                        p,
+                        if s.charging { "  充电中" } else { "" }
+                    ),
+                    None => format!("{}  --", s.name),
+                }
             },
             swatch: swatch_of(s),
         })
@@ -368,6 +382,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             /// 连续读不到的次数。到上限就移出列表 ——
             /// 无线耳机一关机就读不到了，让它继续挂着上一次的电量是在骗人
             misses: u8,
+            /// 联系不上但接收器还在：标成未连接留在列表里（见 Device::silence_is_ambiguous）。
+            /// 它不是 misses 的另一种写法 —— misses 是「准备请出去」，这个是「留着等它回来」
+            offline: bool,
+            /// 承载它的硬件已经不在系统上了：接收器被拔、蓝牙设备从系统里消失。
+            /// 这是硬证据，本轮直接移出，不必攒失败次数
+            detached: bool,
         }
 
         /// 连续读不到几次就把设备移出列表。
@@ -486,6 +506,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 arm_critical: Arm::Armed,
                 arm_warn: Arm::Armed,
                 misses: 0,
+                offline: false,
+                detached: false,
             })
             .collect();
         let mut last_scan = Instant::now();
@@ -512,6 +534,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             arm_critical: Arm::Armed,
                             arm_warn: Arm::Armed,
                             misses: 0,
+                            offline: false,
+                            detached: false,
                         })
                         .collect();
                 }
@@ -529,7 +553,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 「重开 ♪ 出现」要 50 秒，就是被 60 秒的周期卡住的
                 last_scan = Instant::now();
                 for d in device::scan(&api, &profiles) {
-                    if watched.iter().any(|w| w.dev.name == d.name) {
+                    // 按名字找，而不是「在不在列表里」：未连接的设备也在列表里，
+                    // 但它手里那个句柄可能是拔掉之前那一个 —— 接收器拔了又插回来时，
+                    // 旧句柄指向的是一个已经不存在的实例，永远不会再答话，
+                    // 于是它会永远挂着「未连接」。趁它现在答话把句柄换成新的，
+                    // 设备就不必经历「移出列表 — 重新发现」这一趟。
+                    if let Some(i) = watched.iter().position(|w| w.dev.name == d.name) {
+                        let w = &mut watched[i];
+                        if w.offline {
+                            info!("[scan] {} 重新连上了，换用新句柄", d.name);
+                            w.dev = d;
+                            w.offline = false;
+                            w.misses = 0;
+                        }
                         continue;
                     }
                     info!("[scan] 发现新设备：{}", d.name);
@@ -542,6 +578,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         arm_critical: Arm::Armed,
                         arm_warn: Arm::Armed,
                         misses: 0,
+                        offline: false,
+                        detached: false,
                     });
                 }
             }
@@ -551,6 +589,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match w.dev.read() {
                     Some(b) => {
                         w.misses = 0;
+                        w.offline = false;
+                        w.detached = false;
                         // 是不是这台设备的第一次读数：弹药的初始状态由它决定
                         let fresh = w.percent.is_none();
                         if w.percent.map(|p| p != b.percent).unwrap_or(true) {
@@ -565,20 +605,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
                     None => {
                         // 「读不到电量」不等于「设备没了」，先问一句再决定算不算数。
-                        // 设备休眠时（实测 GPW 静止一段时间后就是这样）探测照样答应，
+                        // 设备浅睡时（实测 GPW 静止一段时间后就是这样）探测照样答应，
                         // 只是不回答电量请求。这种情况让它留在列表里、保留上次读数 ——
                         // 用户回来动一下鼠标就恢复了，比从托盘消失再冒出来好得多。
                         if w.dev.present() {
                             w.misses = 0;
+                            w.offline = false;
                             debug!(
                                 "[battery] {} 没回答电量请求（设备仍在，保留上次读数）",
                                 w.dev.name
                             );
                             continue;
                         }
+
+                        // 硬件已经不在系统上了（接收器被拔、蓝牙设备从系统里消失）：
+                        // 这是硬证据，不用攒失败次数，本轮就请出去。
+                        if w.dev.gone() {
+                            w.detached = true;
+                            continue;
+                        }
+
+                        // 剩下的情况：硬件还在，但设备不答话。
+                        if w.dev.silence_is_ambiguous() {
+                            // HID 接收器设备分不清「休眠」和「关机」—— 两者都是不回答。
+                            // 那就老实标成未连接留着，别把睡着的鼠标从托盘抹掉
+                            // （2026-10-25 实测：鼠标睡一觉就被移出，托盘变成灰色
+                            // 「未检测到设备」，用户一动鼠标它又冒出来，来回折腾）。
+                            w.misses = 0;
+                            if !w.offline {
+                                warn!(
+                                    "[battery] {} 联系不上了（接收器仍在），标记为未连接",
+                                    w.dev.name
+                                );
+                            }
+                            w.offline = true;
+                            continue;
+                        }
+
+                        // 蓝牙：明确知道没连上，那就是关了，照旧攒次数请出去
                         w.misses = w.misses.saturating_add(1);
                         warn!(
-                            "[battery] {} 探测不到，读取失败（连续 {} 次），保留上次读数",
+                            "[battery] {} 读取失败（连续 {} 次），保留上次读数",
                             w.dev.name, w.misses
                         );
                     }
@@ -595,11 +662,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // 「彻底没了」的设备立即移出，不必攒够次数。
-            // 容错是给「暂时读不到」留的余地 —— 实测过 HID 设备会因为
-            // USB 重枚举连着失败（2026-10-23），所以 HID 那边要靠 misses 攒够。
-            // 而「连设备对象都构造不出来」是另一种性质的证据，不需要那份耐心。
+            // 判据是硬件层面的：接收器被拔掉，或者蓝牙设备从系统里消失 ——
+            // 都是硬证据，不需要那份耐心。
+            // 而「接收器还在、设备不答话」不算：那可能是休眠，已经标成未连接留着了。
             let before_gone = watched.len();
-            watched.retain(|w| !w.dev.gone());
+            watched.retain(|w| !w.detached);
             if watched.len() != before_gone {
                 info!(
                     "[scan] {} 台设备已从系统消失，立即移出列表",
@@ -620,8 +687,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|w| Status {
                     name: w.dev.name.clone(),
                     short: w.dev.short.clone(),
-                    percent: w.percent,
-                    charging: w.charging,
+                    // 未连接的设备不报数：上次读数可能是一小时前的，
+                    // 让它继续参与「取最低那台」会把过时的数字当真的用
+                    percent: if w.offline { None } else { w.percent },
+                    charging: w.charging && !w.offline,
+                    offline: w.offline,
                 })
                 .collect::<Vec<_>>();
             if tx.send(snap).is_err() {
@@ -634,7 +704,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
-            let still_pending = watched.is_empty() || watched.iter().any(|w| w.percent.is_none());
+            // 未连接的设备不算「还没读出来」—— 它读出来过，只是现在联系不上。
+            // 算进去的话轮询会永久卡在 5 秒一輪，白费力气
+            let still_pending =
+                watched.is_empty() || watched.iter().any(|w| w.percent.is_none() && !w.offline);
             // 有设备刚读失败、还在等第二次确认：别等满一个周期，否则关机后
             // 两次确认之间又要白等 30 秒，用户会以为程序没反应
             let confirming = watched.iter().any(|w| w.misses > 0);
@@ -930,6 +1003,18 @@ mod tests {
             short: short.to_string(),
             percent: pct,
             charging: false,
+            offline: false,
+        }
+    }
+
+    /// 未连接的设备：给不出数，只能报状态
+    fn offline(name: &str, short: &str) -> Status {
+        Status {
+            name: name.to_string(),
+            short: short.to_string(),
+            percent: None,
+            charging: false,
+            offline: true,
         }
     }
 
@@ -966,6 +1051,25 @@ mod tests {
             s("HyperX Cloud Flight", "Cloud Flight", Some(60)),
         ]);
         assert_eq!(t, "Cloud Flight 60% · 未知 --");
+    }
+
+    /// 守的是 2026-10-25 那次：鼠标睡一觉就被当成「设备没了」删掉，
+    /// 托盘变成灰色「未检测到设备」。现在它该留在列表里标明未连接
+    #[test]
+    fn 未连接的设备留在列表里且说未连接() {
+        let t = tooltip_of(&[offline("Pro Wireless Gaming Mouse", "GPW")]);
+        assert_eq!(t, "Pro Wireless Gaming Mouse（未连接）");
+    }
+
+    /// 未连接排在「在线但读不到」之后：它是明确的离线，不该跟读不到混在一起
+    #[test]
+    fn 未连接排在最后() {
+        let t = tooltip_of(&[
+            offline("HyperX Cloud Flight", "天箭"),
+            s("未知设备", "未知", None),
+            s("Logitech G PRO Wireless", "GPW", Some(88)),
+        ]);
+        assert_eq!(t, "GPW 88% · 未知 -- · 天箭（未连接）");
     }
 
     /// 这条守的是「将来加了第三台、第四台设备」：名字再长也不会被系统截成半句话

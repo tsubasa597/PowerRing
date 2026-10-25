@@ -76,6 +76,16 @@ impl RawDev {
     pub fn probe(&self) -> bool {
         self.battery().is_some()
     }
+
+    /// 这个 USB 接口在系统上还在不在（判据是写入成不成功，见 `Hidpp::attached`）。
+    /// 接收器插着但耳机没开时它仍然是 true —— 那是「设备在但没开机」，
+    /// 跟「接收器被拔了」不是一回事。
+    pub fn attached(&self) -> bool {
+        let mut out = vec![0u8; self.spec.reply_len];
+        let n = self.spec.request.len().min(out.len());
+        out[..n].copy_from_slice(&self.spec.request[..n]);
+        self.dev.write(&out).is_ok()
+    }
 }
 
 /// 在分段表里查百分比：找到第一条「数值 ≤ 上界」就取它对应的百分比。

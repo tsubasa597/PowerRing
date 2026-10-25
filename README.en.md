@@ -23,7 +23,7 @@ Battery monitor for wireless peripherals on Windows. A ring in the tray tells yo
 | Low battery alerts | Fires once when crossing a threshold, then stays quiet. Card is anchored next to the tray icon |
 | Start with Windows | Writes `HKCU\...\Run`, no elevation. A named mutex keeps a second instance from spawning a second icon |
 | Theme | Follow system / light / dark. You can force dark even when apps are light and only the taskbar is dark |
-| Auto discovery | Rescans the bus every 60 s: a device you switch on mid-session shows up on its own. A device you switch off drops out within tens of seconds instead of reporting stale numbers — **and for three minutes after something vanishes the pace tightens to every 10 s**, so switching it back on brings it straight back |
+| Auto discovery | Rescans the bus every 60 s: a device you switch on mid-session shows up on its own — **and for three minutes after something vanishes the pace tightens to every 10 s**, so switching it back on brings it straight back. A device that stops answering is marked *disconnected* and stays in the tray: it never reports a stale number, but it also does not disappear just because it dozed off |
 | Logs | `%APPDATA%\PowerRing\log.txt`, rotates above 1 MB |
 
 Settings expose the refresh interval, warning and critical thresholds, the alert toggle (with a "Test once" button so you can verify it immediately), start-with-Windows and the theme.
