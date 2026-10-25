@@ -59,6 +59,13 @@ pub fn line(level: &str, msg: String) {
     }
 }
 
+/// 比 INFO 低一级：留给「每隔一轮就会发生一次」的那种正常状态。
+/// 用 INFO 记它们会把真正值得看的行冲掉 —— 设备睡一夜就是上千条。
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => { $crate::log::line("DEBUG", format!($($arg)*)) };
+}
+
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => { $crate::log::line("INFO", format!($($arg)*)) };

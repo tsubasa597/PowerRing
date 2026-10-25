@@ -564,9 +564,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
                     None => {
+                        // 「读不到电量」不等于「设备没了」，先问一句再决定算不算数。
+                        // 设备休眠时（实测 GPW 静止一段时间后就是这样）探测照样答应，
+                        // 只是不回答电量请求。这种情况让它留在列表里、保留上次读数 ——
+                        // 用户回来动一下鼠标就恢复了，比从托盘消失再冒出来好得多。
+                        if w.dev.present() {
+                            w.misses = 0;
+                            debug!(
+                                "[battery] {} 没回答电量请求（设备仍在，保留上次读数）",
+                                w.dev.name
+                            );
+                            continue;
+                        }
                         w.misses = w.misses.saturating_add(1);
                         warn!(
-                            "[battery] {} 读取失败（连续 {} 次），保留上次读数",
+                            "[battery] {} 探测不到，读取失败（连续 {} 次），保留上次读数",
                             w.dev.name, w.misses
                         );
                     }
