@@ -64,6 +64,8 @@ It lists every Bluetooth device on your machine exposing the standard battery se
 
 **The app prefers the fresh read** and only falls back to the cached one when the read fails at that instant. Comparing it against Windows' Bluetooth settings: both read the same GATT value, so they agree on substance; the difference is that the Settings page shows whatever it last synced, so the fresh read is newer whenever the level just changed.
 
+> If it prints "0 devices", don't suspect the script first: it means there is **currently** no Bluetooth device that is both connected and exposing the standard battery service — controller switched off, not paired, or connected by USB cable only all count. Pair it over Bluetooth and run again.
+
 Device declarations live in `devices/`. Every YAML carries `protocol_source` (where the constants came from) and `verification`. **Anything not tested on real hardware is marked `unverified`.**
 
 ## Usage
