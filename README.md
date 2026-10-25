@@ -218,9 +218,15 @@ cargo build --release
 
 ### 认不出来的时候：导出设备信息
 
-**右键托盘图标 → 导出设备信息…**，一段纯文本就进了剪贴板。把它粘到
-[设备请求 Issue](https://github.com/vkeyzhen/PowerRing/issues/new?template=device-request.yml)
-里，或者直接发给维护者 —— 不用 GitHub 也走得通，信息最终是给维护者看的。
+**右键托盘图标 → 导出设备信息…**，一段纯文本就进了剪贴板。
+
+交出去有两条路，都不用懂代码：
+
+- **提交设备信息…**（同一个菜单里）：打开收集页，粘贴、提交。**不用注册账号**。
+  这是给不上 GitHub 的人准备的，也是维护者收得到数据的主要入口 ——
+  [wj.qq.com/s2/28339156/r6r6](https://wj.qq.com/s2/28339156/r6r6)
+- [设备请求 Issue](https://github.com/vkeyzhen/PowerRing/issues/new?template=device-request.yml)：
+  习惯用 GitHub 的话走这条，同样把那段文本贴进去
 
 那里面有三段：程序当前显示了哪些设备、系统里有哪些暴露标准电池服务的蓝牙设备、本机所有 USB HID 接口的 VID:PID 与 usage。维护者凭这些就能判断该不该加、怎么加。
 

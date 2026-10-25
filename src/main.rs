@@ -305,6 +305,41 @@ fn claim_single_instance() -> bool {
     }
 }
 
+/// 设备信息收集页。不上 GitHub 的人也需要一条路把设备报过来，
+/// 所以它是一个免登录问卷而不是 Issue 模板。
+///
+/// 换链接时记得同步三处：README.md、README.en.md、.github/ISSUE_TEMPLATE/device-request.yml
+const SUBMIT_URL: &str = "https://wj.qq.com/s2/28339156/r6r6";
+
+/// 用系统默认浏览器打开一个网址。
+///
+/// 为什么用 ShellExecuteW 而不是拉起 chrome.exe：默认浏览器不一定是谁，
+/// 硬编码只会打开错的那个（甚至根本没装）。交给 Shell 就永远是对的。
+fn open_url(url: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let r = unsafe {
+        ShellExecuteW(
+            None, // 不挂父窗口：托盘程序没有主窗口，硬造一个反而容易把浏览器挡住
+            PCWSTR(op.as_ptr()),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // 约定：返回值大于 32 是成功，否则是错误码（文件没关联、内存不足之类）
+    let ok = r.0 as isize > 32;
+    if !ok {
+        warn!("[tray] 打不开浏览器，ShellExecuteW 返回 {}", r.0 as isize);
+    }
+    ok
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 日志放在最前面：后面任何一步出问题，都要有地方可查
     log::init();
@@ -819,11 +854,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 放在菜单里而不是藏进设置窗口 —— 它只在「设备没被认出来」时才用得上，
     // 而那种时候用户不会想到去翻设置
     let export = MenuItem::new("导出设备信息…", true, None);
+    // 导出到手之后还得有个地方交出去。多数人不愿为报个设备去注册 GitHub 账号，
+    // 所以收集页是一个不用登录就能填的问卷；这一项就是替用户省掉「去哪找链接」
+    let submit = MenuItem::new("提交设备信息…", true, None);
     let quit = MenuItem::new("退出 PowerRing", true, None);
     menu.append(&open_panel)?;
     menu.append(&refresh)?;
     menu.append(&open_settings)?;
     menu.append(&export)?;
+    menu.append(&submit)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
@@ -831,14 +870,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 菜单线程拿不到 TrayIcon（它不是 Send），只能把意图传回主线程，由主线程真正去做
     let panel_requested = Arc::new(AtomicBool::new(false));
     let settings_requested = Arc::new(AtomicBool::new(false));
+    // 「提交设备信息…」：打开浏览器这件事留在主线程做（和设置窗口同理），
+    // 菜单线程只负责记下意图
+    let submit_requested = Arc::new(AtomicBool::new(false));
     let panel_id = open_panel.id().clone();
     let refresh_id = refresh.id().clone();
     let settings_id = open_settings.id().clone();
     let export_id = export.id().clone();
+    let submit_id = submit.id().clone();
     let quit_id = quit.id().clone();
     let flag = quitting.clone();
     let req = panel_requested.clone();
     let sreq = settings_requested.clone();
+    let sbreq = submit_requested.clone();
     let trigger = trig_tx.clone();
     let exp = export_tx.clone();
     // MenuEvent 只有在消息泵跑起来之后才会产生，所以这里只是「接」，不是「驱动」
@@ -855,6 +899,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 顺手把轮询线程叫醒：它平时睡在 recv_timeout 上，最长一个周期（30 秒）。
                 // 不叫醒的话，「点一下导出」要干等到下一轮才有卡片弹出来
                 let _ = trigger.send(());
+            } else if ev.id() == &submit_id {
+                sbreq.store(true, Ordering::SeqCst);
             } else if ev.id() == &quit_id {
                 info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
@@ -1001,6 +1047,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             popup::alert(lines, "导出设备信息", icon_rect(&tray));
         }
 
+        // 「提交设备信息…」：打开收集页。
+        // 浏览器打不开时不能就这么算了 —— 用户点了两下却什么都没发生，
+        // 只会认为功能坏了。退路是把链接塞进剪贴板，他可以自己粘到地址栏
+        if submit_requested.swap(false, Ordering::SeqCst) {
+            if open_url(SUBMIT_URL) {
+                info!("[report] 已打开收集页 {SUBMIT_URL}");
+            } else {
+                let second = match report::copy(SUBMIT_URL) {
+                    Ok(()) => "链接已复制到剪贴板",
+                    Err(_) => "请把链接手动敲进浏览器",
+                };
+                popup::alert(
+                    vec![
+                        Line {
+                            text: "打不开浏览器".to_string(),
+                            swatch: color_of(5, false),
+                        },
+                        Line {
+                            text: second.to_string(),
+                            swatch: (150, 150, 150),
+                        },
+                        Line {
+                            text: SUBMIT_URL.to_string(),
+                            swatch: (150, 150, 150),
+                        },
+                    ],
+                    "提交设备信息",
+                    icon_rect(&tray),
+                );
+            }
+        }
+
         // 设置窗口里的「试一次」：提醒本来只在跌破阈值时发生，鼠标不会说低就低，
         // 没有这个入口用户就没法确认卡片长什么样、弹在哪个位置
         if settings::take_test_request() {
@@ -1124,7 +1202,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tooltip_of, Status, TIP_MAX_CHARS};
+    use super::{tooltip_of, Status, SUBMIT_URL, TIP_MAX_CHARS};
+
+    /// 收集页的链接是写死在程序里的，改的时候容易手滑：
+    /// 少个 s、多截一个字符，点下去就是 404，而这个错只有真去点才会发现。
+    /// 所以让格式有个断言兜底
+    #[test]
+    fn 收集页链接是完整地址() {
+        assert!(
+            SUBMIT_URL.starts_with("https://"),
+            "必须是 https：{SUBMIT_URL}"
+        );
+        assert!(
+            SUBMIT_URL.contains("/s2/"),
+            "看着不像问卷投放链接：{SUBMIT_URL}"
+        );
+        assert!(!SUBMIT_URL.ends_with('/'), "末尾多了斜杠：{SUBMIT_URL}");
+    }
 
     fn s(name: &str, short: &str, pct: Option<u8>) -> Status {
         Status {

@@ -209,7 +209,13 @@ What genuinely cannot be recognised (vendor-private protocols, the HyperX Cloud 
 
 ### When it is not recognised: export device info
 
-**Right-click the tray icon → Export device info…** and a plain-text report lands on your clipboard. Paste it into a [device request issue](https://github.com/vkeyzhen/PowerRing/issues/new?template=device-request.yml), or send it to whoever maintains your copy — GitHub is not required, the report just has to reach a human.
+**Right-click the tray icon → Export device info…** and a plain-text report lands on your clipboard. Two ways to hand it over, neither needs any coding:
+
+- **Submit device info…** (in the same menu): opens a form page — paste, submit, done. **No account needed.**
+  This is the route for people without GitHub, and the one the maintainer actually collects:
+  [wj.qq.com/s2/28339156/r6r6](https://wj.qq.com/s2/28339156/r6r6)
+- [Device request issue](https://github.com/vkeyzhen/PowerRing/issues/new?template=device-request.yml):
+  if you already use GitHub, paste the same text there
 
 It has three sections: what the app is currently showing, which Bluetooth devices expose the standard battery service, and the VID:PID plus usage of every USB HID interface on the machine. That is enough to decide whether a device can be added and how.
 
