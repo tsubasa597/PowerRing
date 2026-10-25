@@ -201,6 +201,8 @@ Do not reach for the YAML template just yet — the app tries to recognise it on
 | Bluetooth (controllers, some keyboards and headsets) | Anything exposing the standard Battery Service (`0x180F`) is readable, and the percentage is **reported by the device itself** |
 | Logitech (mice, keyboards; receiver or cable) | We ask whether it supports a battery feature (`0x1001` voltage, `0x1004` unified). It counts only if the device answers **and we actually read one plausible value** |
 
+Every slot on a receiver is probed, not just the first one that answers — if a mouse and a keyboard share one receiver and report battery differently (one in millivolts, one as a percentage), both show up.
+
 Anything recognised is written out as a **standard YAML declaration** under `%APPDATA%\PowerRing\devices`, so the next launch hits it directly instead of probing again. You can delete that file (it will be re-discovered next time) or paste it straight into an issue — it is already a declaration that can be merged as-is.
 
 Two rules who anyone touching this code should keep: **only send HID++ reports to Logitech devices** (it is their protocol; firing vendor-private requests at someone else's hardware wakes sleeping devices), and **only probe on the first round after launch and while no device has been found** — once something is in use, leave it alone.
