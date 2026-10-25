@@ -85,8 +85,16 @@ pub(crate) fn try_direct(conn: &Hidpp) -> Option<(u16, BatteryKind)> {
     None
 }
 
-/// 试认这个接口是不是「接收器」，上面挂着几台设备
-pub(crate) fn try_receiver(conn: &Hidpp) -> Option<(u8, u16, BatteryKind)> {
+/// 试认这个接口是不是「接收器」，上面挂着几台设备。
+///
+/// 返回**所有**读到合理电量的 slot，而不是第一个就收工 —— 一个接收器可以
+/// 同时挂着鼠标和键盘，而这两台未必用同一个电量 feature（实测过电压式与
+/// 百分比式混挂的情况）。只认第一台的话，后面那台会因为 feature 对不上号被漏掉。
+///
+/// 代价是每个 slot 都要问一遍，等于多唤醒几次设备。自动发现只在启动首轮和
+/// 「一台设备都没有」的时候跑，认出来就落盘、之后不再探，所以这笔账只付一次。
+pub(crate) fn try_receiver(conn: &Hidpp) -> Vec<(u8, u16, BatteryKind)> {
+    let mut out = Vec::new();
     for slot in RECEIVER_SLOTS {
         for (feat, kind) in BATTERY_FEATURES {
             if conn.feature_index(slot, feat).is_none() {
@@ -94,12 +102,33 @@ pub(crate) fn try_receiver(conn: &Hidpp) -> Option<(u8, u16, BatteryKind)> {
             }
             if let Some(b) = read_battery(conn, slot, feat, kind) {
                 if plausible(&b, kind) {
-                    return Some((slot, feat, kind));
+                    out.push((slot, feat, kind));
+                    // 这个 slot 已经认下了，没必要再拿另一个 feature 问它一遍
+                    break;
                 }
             }
         }
     }
-    None
+    out
+}
+
+/// 把「每个 slot 各自支持哪个 feature」归并成「每种 feature 一份声明」。
+///
+/// 为什么要归并：主循环会遍历声明里的每个 slot，所以挂在同一个 feature 上的
+/// 几台设备共用一份声明就够了，分开写只会让面板里出现重复的行。
+/// 而**用另一种 feature 的那台必须单独一份** —— 主循环拿着 0x1001 去问它，
+/// 它对不上号，等于漏掉一台。
+///
+/// 返回 (feature, 取值方式, 命中的 slot 列表)，slot 保持发现时的顺序。
+fn merge_by_feature(found: &[(u8, u16, BatteryKind)]) -> Vec<(u16, BatteryKind, Vec<u8>)> {
+    let mut out: Vec<(u16, BatteryKind, Vec<u8>)> = Vec::new();
+    for (slot, feat, kind) in found {
+        match out.iter_mut().find(|(f, k, _)| *f == *feat && *k == *kind) {
+            Some((_, _, slots)) => slots.push(*slot),
+            None => out.push((*feat, *kind, vec![*slot])),
+        }
+    }
+    out
 }
 
 /// 这个接口是**接收器**还是**直连设备**？
@@ -213,39 +242,54 @@ pub fn find(api: &HidApi, declared: &[Profile]) -> Vec<Profile> {
         // 先分清它是接收器还是直连设备，再决定怎么问 —— 顺序反了会在接收器上
         // 只认住 index 1，设备漂到别的 slot 就再也读不到
         let fallback = hid_name(info);
-        let found = if looks_direct(&conn) {
-            try_direct(&conn)
-                .map(|(feat, kind)| (DIRECT_IDX, feat, kind, Transport::Direct, vec![DIRECT_IDX]))
-        } else {
-            None
-        };
-        let (idx, feat, kind, transport, slots) = match found {
-            Some(v) => v,
-            None => match try_receiver(&conn) {
-                // 接收器上可能有好几台设备、slot 还会漂移，所以把 slot 全写进声明：
-                // 空 slot 不会应答，写了不会多出一台设备，反而能接住漂移
-                Some((slot, feat, kind)) => (
-                    slot,
+
+        if looks_direct(&conn) {
+            if let Some((feat, kind)) = try_direct(&conn) {
+                let name = best_name(&conn, DIRECT_IDX, fallback);
+                info!(
+                    "[discover] HID++：{}（{vid:04X}:{pid:04X}）电量 feature {feat:#06X}，按直连模式自动加入",
+                    name
+                );
+                seen.push((vid, pid));
+                out.push(hidpp_profile(
+                    name,
+                    vid,
+                    pid,
                     feat,
                     kind,
-                    Transport::Receiver,
-                    RECEIVER_SLOTS.collect(),
-                ),
-                None => continue,
-            },
-        };
-        let name = best_name(&conn, idx, fallback);
-        info!(
-            "[discover] HID++：{}（{vid:04X}:{pid:04X}）电量 feature {feat:#06X}，按{}模式自动加入",
-            name,
-            if transport == Transport::Receiver {
-                "接收器"
-            } else {
-                "直连"
+                    Transport::Direct,
+                    vec![DIRECT_IDX],
+                ));
+                continue;
             }
-        );
+        }
+
+        let found = try_receiver(&conn);
+        if found.is_empty() {
+            continue;
+        }
+        let slots: Vec<u8> = RECEIVER_SLOTS.collect();
+        for (feat, kind, hit) in merge_by_feature(&found) {
+            // 名字只是兜底：主循环每轮都会去问设备自报的名字，
+            // 面板上显示的是各自那一台，不是「发现时恰好排第一的那台」
+            let name = best_name(&conn, hit[0], fallback.clone());
+            info!(
+                "[discover] HID++：{}（{vid:04X}:{pid:04X}）slot {:?} 支持电量 feature {feat:#06X}，按接收器模式自动加入",
+                name, hit
+            );
+            out.push(hidpp_profile(
+                name,
+                vid,
+                pid,
+                feat,
+                kind,
+                Transport::Receiver,
+                // slot 会漂移（GPW 实测漂过），所以还是把 1..6 全写进声明：
+                // 空 slot 不应答，写了不会多出一台设备，反而能接住漂移
+                slots.clone(),
+            ));
+        }
         seen.push((vid, pid));
-        out.push(hidpp_profile(name, vid, pid, feat, kind, transport, slots));
     }
     out
 }
@@ -333,6 +377,48 @@ mod tests {
         };
         assert!(plausible(&low, BatteryKind::Voltage));
         assert!(plausible(&high, BatteryKind::Voltage));
+    }
+
+    /// 归并规则是这次改动的全部内容，而它没法靠「插两台设备」稳定复现
+    /// （要一收多发、两台还得用不同的电量 feature），所以用构造数据守住：
+    /// 同 feature 合并成一份、不同 feature 各出一份、顺序不乱
+    #[test]
+    fn 同一个接收器上混挂两种电量方式时各出一份声明() {
+        let found = vec![
+            (1, F_BATTERY_VOLTAGE, BatteryKind::Voltage),
+            (2, F_UNIFIED_BATTERY, BatteryKind::Percent),
+            (4, F_BATTERY_VOLTAGE, BatteryKind::Voltage),
+        ];
+        let merged = merge_by_feature(&found);
+        assert_eq!(merged.len(), 2, "两种电量方式要有两份声明，否则会漏一台");
+
+        let volt = merged
+            .iter()
+            .find(|(f, _, _)| *f == F_BATTERY_VOLTAGE)
+            .expect("电压式那一份不能少");
+        assert_eq!(volt.2, vec![1, 4], "同 feature 的 slot 要合到一份里");
+        assert_eq!(volt.1, BatteryKind::Voltage);
+
+        let pct = merged
+            .iter()
+            .find(|(f, _, _)| *f == F_UNIFIED_BATTERY)
+            .expect("百分比式那一份不能少");
+        assert_eq!(pct.2, vec![2]);
+        assert_eq!(pct.1, BatteryKind::Percent);
+    }
+
+    #[test]
+    fn 归并结果为空时不出声明() {
+        // 一个都没读到就不该写出任何东西：声明不是「猜的」，是读到过才算
+        assert!(merge_by_feature(&[]).is_empty());
+    }
+
+    #[test]
+    fn 只有一台设备时归并结果仍是它自己() {
+        let found = vec![(3, F_BATTERY_VOLTAGE, BatteryKind::Voltage)];
+        let merged = merge_by_feature(&found);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].2, vec![3]);
     }
 
     #[test]

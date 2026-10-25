@@ -344,7 +344,13 @@ pub fn save_discovered(list: &[Profile]) -> usize {
     }
     let mut n = 0;
     for p in list {
-        let path = dir.join(format!("auto-{:04X}-{:04X}.yaml", p.vid, p.pid));
+        // 文件名带电量 feature：同一个接收器上可能挂着用不同 feature 的两台设备，
+        // 那就得有两份声明。不带后缀的话第二份会被「已存在」挡掉，等于白认一台
+        let tag = match p.battery_feature {
+            Some(f) => format!("-{f:04X}"),
+            None => String::new(),
+        };
+        let path = dir.join(format!("auto-{:04X}-{:04X}{tag}.yaml", p.vid, p.pid));
         if path.exists() {
             continue;
         }

@@ -167,16 +167,22 @@ fn hidpp_line(api: &HidApi, info: &DeviceInfo) -> String {
             None => "HID++：答应探测，但读不到电量".to_string(),
         }
     } else {
-        match try_receiver(&conn) {
-            Some((slot, feat, kind)) => {
-                let name = best_name(&conn, slot, "（读不到名字）".into());
-                format!(
-                    "HID++：接收器，slot {slot} 支持电量 {feat:#06X}（{}），设备自报“{name}”",
-                    kind_name(kind)
-                )
-            }
-            None => "HID++：没答应探测".to_string(),
+        // 全 slot 都问，因为一个接收器上可能挂好几台（鼠标 + 键盘），
+        // 只报第一个等于替维护者决定「这台不重要」—— 上报要的是完整画面
+        let found = try_receiver(&conn);
+        if found.is_empty() {
+            return "HID++：没答应探测".to_string();
         }
+        let mut s = format!("HID++：接收器，{} 个 slot 有回应", found.len());
+        for (slot, feat, kind) in found {
+            let name = best_name(&conn, slot, "（读不到名字）".into());
+            let _ = write!(
+                s,
+                "；slot {slot} 电量 {feat:#06X}（{}）设备自报“{name}”",
+                kind_name(kind)
+            );
+        }
+        s
     }
 }
 
