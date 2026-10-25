@@ -751,24 +751,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if alert_tx.send(alerts).is_err() {
                 break;
             }
-            // 有人点了「导出设备信息」：报表必须在这一侧生成（HidApi 在这儿），
-            // 生成完立刻交回主线程，让它去写剪贴板
-            if export_rx.try_recv().is_ok() {
-                // 连点会攒下多个信号，排空，免得连着生成好几份
-                while export_rx.try_recv().is_ok() {}
-                let known = watched
-                    .iter()
-                    .map(|w| crate::report::Known {
-                        name: w.dev.name.clone(),
-                        percent: if w.offline { None } else { w.percent },
-                        charging: w.charging && !w.offline,
-                    })
-                    .collect::<Vec<_>>();
-                info!("[report] 生成设备信息报表（当前 {} 台设备）", known.len());
-                if report_tx.send(crate::report::build(&api, &known)).is_err() {
-                    break;
-                }
-            }
             // 只要还有设备从没读出来过，就用 5 秒短间隔重试，而不是干等一整轮。
             // 实测：开机或上一进程被强杀后，接收器会有几十秒不响应，
             // 若按 60 秒轮询，面板会长时间挂着「--」，看起来像坏了。
@@ -799,6 +781,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            // 有人点了「导出设备信息」：报表必须在这一侧生成（HidApi 在这儿），
+            // 生成完立刻交回主线程，由它写剪贴板。
+            // 检查点放在**睡醒之后**而不是一轮的开头：点菜单时会顺带把这一侧叫醒，
+            // 于是卡片几乎是立刻弹出来，不用再白跑一整轮读电量
+            if export_rx.try_recv().is_ok() {
+                // 连点会攒下多个信号，排空，免得连着生成好几份
+                while export_rx.try_recv().is_ok() {}
+                let known = watched
+                    .iter()
+                    .map(|w| crate::report::Known {
+                        name: w.dev.name.clone(),
+                        percent: if w.offline { None } else { w.percent },
+                        charging: w.charging && !w.offline,
+                    })
+                    .collect::<Vec<_>>();
+                info!("[report] 生成设备信息报表（当前 {} 台设备）", known.len());
+                if report_tx.send(crate::report::build(&api, &known)).is_err() {
+                    break;
+                }
             }
         }
     });
@@ -849,6 +852,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sreq.store(true, Ordering::SeqCst);
             } else if ev.id() == &export_id {
                 let _ = exp.send(());
+                // 顺手把轮询线程叫醒：它平时睡在 recv_timeout 上，最长一个周期（30 秒）。
+                // 不叫醒的话，「点一下导出」要干等到下一轮才有卡片弹出来
+                let _ = trigger.send(());
             } else if ev.id() == &quit_id {
                 info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
@@ -875,6 +881,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 这个开关让「导出」这条链路能被自动验证，也能用来排查用户报上来的那台机器
     if std::env::var("POWERRING_EXPORT_REPORT").is_ok() {
         let _ = export_tx.send(());
+        // 同上：把它叫醒，不然要等一整轮
+        let _ = trig_tx.send(());
     }
 
     info!(

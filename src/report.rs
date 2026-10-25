@@ -26,6 +26,10 @@ use crate::discover::{best_name, looks_direct, try_direct, try_receiver, HIDPP_V
 use crate::hidpp::{BatteryKind, Hidpp};
 use crate::warn;
 
+/// 厂商自定义 usage page 的起点。HID 规范里 0xFF00 以上是留给厂商的，
+/// HID++ 这类私有协议只会挂在那些接口上。
+const VENDOR_PAGE: u16 = 0xFF00;
+
 /// 程序当前显示着的设备（由 main 传进来，这里不自己去读一遍 ——
 /// 用户看到的和他要上报的必须是同一份事实）
 pub struct Known {
@@ -98,7 +102,17 @@ pub fn build(api: &HidApi, known: &[Known]) -> String {
         let _ = writeln!(s, "  {}", interface_line(info));
         // 只对罗技问 HID++：这条纪律同 discover.rs，不因为「反正要上报」就放开
         if HIDPP_VENDORS.contains(&info.vendor_id()) {
-            let _ = writeln!(s, "      {}", hidpp_line(api, info));
+            // HID++ 走厂商自定义接口（usage_page 从 0xFF00 起）。标准键鼠接口
+            // （0x0001 通用桌面、0x000C 消费控制）不可能是它 —— 对着十几个标准接口
+            // 逐个发探测，只是让「点一下导出」多等十几秒，信息量却是零
+            if info.usage_page() >= VENDOR_PAGE {
+                let _ = writeln!(s, "      {}", hidpp_line(api, info));
+            } else {
+                let _ = writeln!(
+                    s,
+                    "      HID++：未探测（标准 HID 接口，HID++ 走厂商自定义接口）"
+                );
+            }
         }
     }
 
