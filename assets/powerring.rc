@@ -1,0 +1,46 @@
+// PowerRing 的 exe 资源：图标 + 版本信息
+//
+// 这几行决定用户在资源管理器和「属性 → 详细信息」里看到什么。
+// 图标由 tools/make_icon.py 生成（与托盘里的电量环同一套几何）。
+//
+// 不用 #include <winres.h> / <windows.h>：本机的 windres 是 GNU 那一套，
+// 找不到 MSVC SDK 的头文件，include 了会静默失败 —— 图标进得去、版本信息全空。
+// 所以这里一律用资源脚本的原生写法（数值 / 字符串字面量），不依赖任何头。
+//
+// 值只用 ASCII：rc 文件是不带 BOM 的 UTF-8，而 windres 按系统代码页（中文系统是 GBK）
+// 读它 —— 中文和长破折号会变成乱码，还会在末尾留下一个多余的字节。
+// 想在中文系统上正确显示中文，得把文件存成带 BOM 的 UTF-16，那又会让 git diff 变难看，
+// 不值得：这些字段本来就是给系统识别用的，说明文字在 README 里。
+
+1 ICON "app.ico"
+
+1 VERSIONINFO
+    FILEVERSION     0,2,0,0
+    PRODUCTVERSION  0,2,0,0
+    FILEFLAGSMASK   0x3fL
+    FILEFLAGS       0x0L
+    FILEOS          0x40004L
+    FILETYPE        0x1L
+    FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0409 = 英文（美国），04B0 = Unicode。中文值装进英文块，是为了让
+        // 非中文系统也能读出来 —— 换成 0804 有些系统会显示成一片问号
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "PowerRing"
+            VALUE "FileDescription",  "PowerRing - wireless peripheral battery monitor"
+            VALUE "FileVersion",      "0.2.0"
+            VALUE "InternalName",     "powerring"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "powerring.exe"
+            VALUE "ProductName",      "PowerRing"
+            VALUE "ProductVersion",   "0.2.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

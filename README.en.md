@@ -86,6 +86,22 @@ PowerRing/
 
 > Windows 10 hides new tray icons inside the `^` overflow. If you don't see it, go to Taskbar settings → Notification area → Select which icons appear on the taskbar.
 
+### First run: Windows will stop you once. That is expected
+
+You will see the blue "Windows protected your PC" panel. **This is not a malware warning.** It is what Windows shows for any program that is not code-signed and does not yet have enough download history — nearly every individually maintained open-source project hits it.
+
+Click **More info → Run anyway**. No developer can remove this prompt without buying a code signing certificate (and then accumulating reputation), so this project is currently unsigned.
+
+If you would rather verify it yourself: the source is public at
+[github.com/vkeyzhen/PowerRing](https://github.com/vkeyzhen/PowerRing), and the zip is built and published by GitHub Actions from that same repository. The program also **makes no network requests** (except opening your browser when you explicitly choose "Submit device info…") and writes nothing outside `%APPDATA%\PowerRing`.
+
+### How to upgrade
+
+**First right-click the tray icon → Exit**, then extract the new zip **over the same folder** and start it again.
+
+- Do not extract into a new folder: the autostart registry entry still points at the old path, so you end up with two copies running — and you will be looking at the old one
+- Overwriting is safe: declarations you added or edited under `%APPDATA%\PowerRing\devices` are left alone
+
 ## Adding a device
 
 Copy the closest YAML in `devices/` and edit a few lines. **No Rust code changes required.** Three flavours:

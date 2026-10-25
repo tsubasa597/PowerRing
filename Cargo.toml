@@ -10,6 +10,11 @@ repository = "https://github.com/vkeyzhen/PowerRing"
 name = "powerring"
 path = "src/main.rs"
 
+[build-dependencies]
+# 把图标和版本信息写进 exe。手写 .rc 也行，但资源编译器怎么调、路径怎么传
+# 在不同环境下容易出岔子，这个库就是专门抹平这些差异的
+embed-resource = "3"
+
 [dependencies]
 hidapi = "2"
 tray-icon = "0"
