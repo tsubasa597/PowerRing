@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI 跑在 pwsh 下，Python 的 stdout 默认是 cp1252，脚本里那几句中文
+  # 输出会直接抛 UnicodeEncodeError。脚本自己也 reconfigure 了一遍，这里是第二层
+  PYTHONIOENCODING: utf-8
 
 jobs:
   check:

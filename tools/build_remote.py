@@ -20,6 +20,14 @@
 import os
 import sys
 
+# CI 上跑这个脚本时 stdout 可能是 cp1252（GitHub 的 pwsh 默认代码页），
+# 打印中文会直接抛 UnicodeEncodeError —— 「想说一句话」不该变成构建失败。
+# 强制 UTF-8；万一还有打不出的字符，换成问号而不是让整个步骤红掉。
+# （实测踩过：--check 其实已经通过了，崩在打印「是最新的」那一句上）
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEVICES = os.path.join(ROOT, "devices")
 OUT = os.path.join(ROOT, "remote", "devices.yaml")
