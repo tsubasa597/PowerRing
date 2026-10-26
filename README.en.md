@@ -5,7 +5,7 @@
 Battery monitor for wireless peripherals on Windows. A ring in the tray tells you how much juice your mouse and headset have left — without installing one vendor app per brand.
 
 - **Single ~1 MB exe**, portable, no admin rights needed
-- **No network, no account, no telemetry** — everything stays on your machine
+- **No background network, no account, no telemetry** — everything stays on your machine
 - **Adding a device = adding a YAML file**, no code changes (see [Adding a device](#adding-a-device))
 
 ![Hovering the tray icon shows all three devices, lowest battery first](assets/tooltip.png)
@@ -93,7 +93,7 @@ You will see the blue "Windows protected your PC" panel. **This is not a malware
 Click **More info → Run anyway**. No developer can remove this prompt without buying a code signing certificate (and then accumulating reputation), so this project is currently unsigned.
 
 If you would rather verify it yourself: the source is public at
-[github.com/vkeyzhen/PowerRing](https://github.com/vkeyzhen/PowerRing), and the zip is built and published by GitHub Actions from that same repository. The program also **makes no network requests** (except opening your browser when you explicitly choose "Submit device info…") and writes nothing outside `%APPDATA%\PowerRing`.
+[github.com/vkeyzhen/PowerRing](https://github.com/vkeyzhen/PowerRing), and the zip is built and published by GitHub Actions from that same repository. The program also **makes no network requests on its own** — the only two happen when you explicitly pick "Submit device info…" or "Check for device profile updates…" in the tray menu — and writes nothing outside `%APPDATA%\PowerRing`.
 
 ### How to upgrade
 
