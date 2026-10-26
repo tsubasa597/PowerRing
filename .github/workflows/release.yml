@@ -23,7 +23,9 @@ jobs:
 
       # 解压即用的目录必须保持 exe 与 devices 平级 ——
       # 程序是按 exe 所在位置去找设备声明的，散着放会一台设备都扫不到
-      - name: 打包 zip
+      # 发布说明也在这里生成：校验值只有打好包之后才算得出来，
+      # 写死在 CHANGELOG 里必然是错的 —— 每次构建产物都不一样
+      - name: 打包 zip 并生成发布说明
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/PowerRing | Out-Null
@@ -36,7 +38,46 @@ jobs:
           # 而且和 README 里画的目录结构对不上，照着文档找会找不到 devices
           Compress-Archive -Path dist/PowerRing -DestinationPath $name
           Write-Host "打包完成：$name"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "产出 $name"
+
+          # 保持大写：本机 certutil 打出来的就是大写，大小写不一致时
+          # 用户肉眼对半天会以为自己对错了
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash
+          $size = (Get-Item $name).Length
+          Write-Host "SHA-256 $hash ($size 字节)"
+
+          # 不用 here-string：YAML 块里每行都带缩进，而 PowerShell 的
+          # here-string 结束符必须顶行首，缩进就直接语法错
+          $head = @(
+            '## 校验值（SHA-256）'
+            ''
+            "文件 ``$name``（$size 字节）"
+            ''
+            '```'
+            $hash
+            '```'
+            ''
+            '下载完想确认拿到的就是这个文件，在本机跑一次对一下：'
+            ''
+            '```'
+            "certutil -hashfile $name SHA256"
+            '```'
+            ''
+            '---'
+            ''
+          ) -join "`n"
+          # 显式 utf8NoBOM：Windows 那个老版本 PowerShell 的 utf8 是**带 BOM 的**，
+          # BOM 会让 markdown 第一行渲染异常。pwsh 这里是 7.x，认这个值
+          Set-Content -Path release-notes.md -Value $head -Encoding utf8NoBOM
+          Add-Content -Path release-notes.md -Value (Get-Content CHANGELOG.md) -Encoding utf8NoBOM
+
+          # 自检：上面那个编码值在旧版 shell 上不存在，而退回带 BOM 的 utf8 又不会
+          # 报错 —— 只会静默发出一份开头是乱码的说明。直接查第一个字节是不是 '#'，
+          # 宁可让这一步红掉，也不要把坏说明发出去
+          $b = [System.IO.File]::ReadAllBytes('release-notes.md')
+          if ($b[0] -ne 0x23) {
+            throw "发布说明第一个字节不是 '#'（多半是 BOM）：0x$('{0:X2}' -f $b[0])"
+          }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "产出 $name / SHA-256 $hash"
 
       - name: 创建 Release
         # v3 起跑在 Node 24 上，v2 是 Node 20（Runner 已弃用，每次跑都挂一条警告）。
@@ -44,6 +85,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           # Release 说明用 CHANGELOG，而不是 GitHub 自动生成的提交列表 ——
-          # 后者是一堆 commit 标题，对第一次点进来的人几乎没信息量
-          body_path: CHANGELOG.md
+          # 后者是一堆 commit 标题，对第一次点进来的人几乎没信息量。
+          # 这里用的是上一步拼出来的版本：CHANGELOG 前面加了一段校验值
+          body_path: release-notes.md
           files: PowerRing-*.zip
