@@ -46,6 +46,8 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    # 声明同步：拉远程设备清单（系统自带，不引 HTTP 依赖）
+    "Win32_Networking_WinHttp",
 ]
 
 # release 档：体积不再是最优目标，编译速度与可调试性优先

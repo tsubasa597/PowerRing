@@ -19,6 +19,11 @@ pub struct Config {
     pub language: String,
     pub theme: String,
     pub autostart: bool,
+    /// 「检查设备声明更新…」从哪里拉清单。留空就用程序内置的两个地址
+    /// （GitHub raw，外加 jsdelivr 备源）。
+    /// 只有连不上 GitHub 的人才需要填 —— 填一个自己那边能通的镜像。
+    /// 这个字段存在的理由：可达性不由我们决定，得给走投无路的人留一条自救的路
+    pub remote_devices_url: String,
     pub update_channel: String,
 }
 
@@ -32,6 +37,7 @@ impl Default for Config {
             language: "zh-CN".into(),
             theme: "system".into(),
             autostart: false,
+            remote_devices_url: String::new(),
             update_channel: "stable".into(),
         }
     }

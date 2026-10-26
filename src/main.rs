@@ -26,6 +26,7 @@ mod profile;
 mod raw;
 mod report;
 mod settings;
+mod sync;
 mod theme;
 mod ui;
 
@@ -311,6 +312,32 @@ fn claim_single_instance() -> bool {
 /// 换链接时记得同步三处：README.md、README.en.md、.github/ISSUE_TEMPLATE/device-request.yml
 const SUBMIT_URL: &str = "https://wj.qq.com/s2/28339156/r6r6";
 
+/// 「检查设备声明更新…」是不是还有一次没回来。
+/// 一次最多要试三个地址、每个最多 8 秒，这期间再点一次不该又发一轮 ——
+/// 重复拉不会带来任何新东西，只会让人等得更久
+static SYNC_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 起一个线程去拉远程声明，结果送进 `tx`。
+///
+/// 必须另起线程：一次同步最多要试三个地址、每个最多 8 秒，
+/// 放在跑消息泵的那个线程上做，窗口就二十几秒不响应，看起来和卡死没区别
+fn start_sync(tx: mpsc::Sender<Result<sync::Outcome, String>>) {
+    let url = settings::sync_url();
+    info!("[sync] 开始，自定义地址={:?}", url);
+    thread::spawn(move || {
+        // 留空表示「用内置的两个源」—— 判断放在这里，
+        // 免得每个调用点都要记得区分「没填」和「填了空串」
+        let custom = if url.trim().is_empty() {
+            None
+        } else {
+            Some(url.as_str())
+        };
+        let out = sync::run(custom);
+        // 收的人可能已经退出了，发不出去就算了
+        let _ = tx.send(out);
+    });
+}
+
 /// 用系统默认浏览器打开一个网址。
 ///
 /// 为什么用 ShellExecuteW 而不是拉起 chrome.exe：默认浏览器不一定是谁，
@@ -390,6 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings::set_interval(interval);
     settings::set_low(cfg.low_warn, cfg.low_critical);
     settings::set_notify(cfg.notify_enabled);
+    settings::set_sync_url(cfg.remote_devices_url.clone());
     // 配色要在建窗口之前定下来：设置窗口和弹窗卡片都是按此刻的主题画的
     theme::set_mode(theme::Mode::from_str(&cfg.theme));
 
@@ -414,6 +442,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 生成完的文本走 report_tx 回主线程，由主线程写剪贴板（剪贴板要在有窗口的线程上开）
     let (export_tx, export_rx) = mpsc::channel::<()>();
     let (report_tx, report_rx) = mpsc::channel::<String>();
+    // 「检查设备声明更新…」：网络请求最坏要等二十几秒，绝不能占着跑消息泵的那个线程
+    // （占住了窗口就不响应，看起来像卡死）。所以另起一个线程去拉，结果送回来弹卡片。
+    // reload 那条是给轮询线程的：声明落到磁盘上了，可它手里那份是启动时读的，
+    // 不通知它重读一遍，用户得重启程序才认得出新设备
+    let (sync_tx, sync_rx) = mpsc::channel::<Result<sync::Outcome, String>>();
+    let (reload_tx, reload_rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         struct Watched {
             dev: device::Device,
@@ -838,6 +872,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
             }
+
+            // 同步落下了新的声明文件：手里这份是启动时读的，得重读一遍。
+            // 不重读的话，用户会看到卡片写着「新增了 3 份」，却一台新设备都没出现 ——
+            // 他只能重启程序，而重启是他不该为「点了一下菜单」付的代价
+            if reload_rx.try_recv().is_ok() {
+                // 连点会攒下多个信号，排空，免得连着重读好几遍
+                while reload_rx.try_recv().is_ok() {}
+                let fresh = profile::load();
+                info!(
+                    "[poll] 重新加载设备声明：{} 份（原来 {} 份）",
+                    fresh.len(),
+                    profiles.len()
+                );
+                profiles = fresh;
+                // 把重扫计时拨到期，下一轮立刻按新声明扫一遍，别让人等一分钟
+                last_scan = Instant::now() - RESCAN_EVERY;
+            }
         }
     });
 
@@ -857,12 +908,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 导出到手之后还得有个地方交出去。多数人不愿为报个设备去注册 GitHub 账号，
     // 所以收集页是一个不用登录就能填的问卷；这一项就是替用户省掉「去哪找链接」
     let submit = MenuItem::new("提交设备信息…", true, None);
+    // 别人适配好的新设备，不用等下一个 exe 版本也能认出来。
+    // 它和「提交设备信息」是一对：一个往外报，一个往回取
+    let sync_profiles = MenuItem::new("检查设备声明更新…", true, None);
     let quit = MenuItem::new("退出 PowerRing", true, None);
     menu.append(&open_panel)?;
     menu.append(&refresh)?;
     menu.append(&open_settings)?;
     menu.append(&export)?;
     menu.append(&submit)?;
+    menu.append(&sync_profiles)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
@@ -873,16 +928,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 「提交设备信息…」：打开浏览器这件事留在主线程做（和设置窗口同理），
     // 菜单线程只负责记下意图
     let submit_requested = Arc::new(AtomicBool::new(false));
+    let sync_requested = Arc::new(AtomicBool::new(false));
     let panel_id = open_panel.id().clone();
     let refresh_id = refresh.id().clone();
     let settings_id = open_settings.id().clone();
     let export_id = export.id().clone();
     let submit_id = submit.id().clone();
+    let sync_profiles_id = sync_profiles.id().clone();
     let quit_id = quit.id().clone();
     let flag = quitting.clone();
     let req = panel_requested.clone();
     let sreq = settings_requested.clone();
     let sbreq = submit_requested.clone();
+    let syreq = sync_requested.clone();
     let trigger = trig_tx.clone();
     let exp = export_tx.clone();
     // MenuEvent 只有在消息泵跑起来之后才会产生，所以这里只是「接」，不是「驱动」
@@ -901,6 +959,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = trigger.send(());
             } else if ev.id() == &submit_id {
                 sbreq.store(true, Ordering::SeqCst);
+            } else if ev.id() == &sync_profiles_id {
+                syreq.store(true, Ordering::SeqCst);
             } else if ev.id() == &quit_id {
                 info!("[tray] 收到退出命令");
                 flag.store(true, Ordering::SeqCst);
@@ -929,6 +989,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = export_tx.send(());
         // 同上：把它叫醒，不然要等一整轮
         let _ = trig_tx.send(());
+    }
+    // 同类开关：设了就开机同步一次设备声明。右键菜单没法在无人值守时点，
+    // 这个开关让同步这条链路能被自动验证，也能用来复现「某人那边拉不到」
+    // 时到底卡在哪个地址上 —— 那种时候他只会说「点了没反应」
+    if std::env::var("POWERRING_SYNC").is_ok() {
+        SYNC_BUSY.store(true, Ordering::SeqCst);
+        start_sync(sync_tx.clone());
     }
 
     info!(
@@ -1077,6 +1144,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     icon_rect(&tray),
                 );
             }
+        }
+
+        // 「检查设备声明更新…」：真正发请求的是另一个线程（网络会卡住消息泵），
+        // 这里只负责把它起起来
+        if sync_requested.swap(false, Ordering::SeqCst) {
+            if SYNC_BUSY
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                info!("[sync] 上一次还没回来，这次不重复发");
+            } else {
+                start_sync(sync_tx.clone());
+            }
+        }
+
+        // 同步的结果回来了：这次成不成都要给个说法。
+        // 沉默最容易被当成「程序没反应」
+        if let Ok(out) = sync_rx.try_recv() {
+            SYNC_BUSY.store(false, Ordering::SeqCst);
+            let (lines, changed) = match out {
+                Ok(o) => {
+                    let head = if o.added > 0 {
+                        format!("新增了 {} 份设备声明", o.added)
+                    } else if o.updated > 0 {
+                        format!("更新了 {} 份设备声明", o.updated)
+                    } else {
+                        "已经是最新了".to_string()
+                    };
+                    let changed = o.added + o.updated > 0;
+                    if changed {
+                        let _ = reload_tx.send(());
+                        // 顺手把它叫醒：它平时睡一整轮，
+                        // 不叫醒的话新声明要等一分钟才生效
+                        let _ = trig_tx.send(());
+                    }
+                    let mut v = vec![Line {
+                        text: head,
+                        swatch: color_of(100, false),
+                    }];
+                    if changed {
+                        v.push(Line {
+                            text: "现在就能用，不用重启".to_string(),
+                            swatch: (150, 150, 150),
+                        });
+                    }
+                    v.push(Line {
+                        text: format!("远程清单共 {} 份", o.total),
+                        swatch: (150, 150, 150),
+                    });
+                    (v, changed)
+                }
+                // 拉不到是常态之一 —— 连不上 GitHub 的人永远拉不到。
+                // 所以措辞是「这次没拉到」而不是「出错了」：已有的设备照常显示，
+                // 这一项本来就是加分项，不是识别设备的唯一途径
+                Err(e) => {
+                    let mut why: String = e.chars().take(60).collect();
+                    if e.chars().count() > 60 {
+                        why.push('…');
+                    }
+                    (
+                        vec![
+                            Line {
+                                text: "这次没拉到更新".to_string(),
+                                swatch: color_of(20, false),
+                            },
+                            Line {
+                                text: "已有的设备照常显示".to_string(),
+                                swatch: (150, 150, 150),
+                            },
+                            Line {
+                                text: why,
+                                swatch: (150, 150, 150),
+                            },
+                        ],
+                        false,
+                    )
+                }
+            };
+            info!("[sync] 结果已弹卡片（声明有变化={changed}）");
+            popup::alert(lines, "检查设备声明更新", icon_rect(&tray));
         }
 
         // 设置窗口里的「试一次」：提醒本来只在跌破阈值时发生，鼠标不会说低就低，

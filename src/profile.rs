@@ -327,6 +327,34 @@ pub fn load() -> Vec<Profile> {
     out
 }
 
+/// 解析远程聚合清单：一个文件里装着多份声明。
+///
+/// 为「检查设备声明更新」准备 —— 一次请求拿全部，而不是一台一个请求。
+/// 清单是**不可信输入**：整份解析不出来就报错，单份有问题只跳过那一份 ——
+/// 不能因为远程某一台写错了，就让所有人一台都同步不到。
+pub fn parse_bundle(text: &str) -> Result<Vec<Profile>, String> {
+    #[derive(Deserialize)]
+    struct Bundle {
+        #[serde(default)]
+        devices: Vec<Raw>,
+    }
+    let b: Bundle = serde_yml::from_str(text).map_err(|e| format!("清单不是合法 YAML：{e}"))?;
+    if b.devices.is_empty() {
+        return Err("清单里一份声明都没有".to_string());
+    }
+    let mut out = Vec::new();
+    for raw in b.devices {
+        match raw.compile() {
+            Ok(p) => out.push(p),
+            Err(e) => warn!("[profile] 远程清单里有一份声明不对，跳过：{e}"),
+        }
+    }
+    if out.is_empty() {
+        return Err("清单里的声明全都用不了".to_string());
+    }
+    Ok(out)
+}
+
 /// 自动发现到的设备落到用户目录，下次启动直接命中，不必再探测一遍。
 ///
 /// 写在 `%APPDATA%\PowerRing\devices` 而不是 exe 旁边：程序可能装在 Program Files，
@@ -344,17 +372,11 @@ pub fn save_discovered(list: &[Profile]) -> usize {
     }
     let mut n = 0;
     for p in list {
-        // 文件名带电量 feature：同一个接收器上可能挂着用不同 feature 的两台设备，
-        // 那就得有两份声明。不带后缀的话第二份会被「已存在」挡掉，等于白认一台
-        let tag = match p.battery_feature {
-            Some(f) => format!("-{f:04X}"),
-            None => String::new(),
-        };
-        let path = dir.join(format!("auto-{:04X}-{:04X}{tag}.yaml", p.vid, p.pid));
+        let path = dir.join(format!("auto-{}.yaml", slug(p)));
         if path.exists() {
             continue;
         }
-        match fs::write(&path, to_yaml(p)) {
+        match fs::write(&path, to_yaml(p, NOTE_DISCOVERED)) {
             Ok(()) => {
                 info!("[profile] 记下新设备 {:?}", path);
                 n += 1;
@@ -363,6 +385,69 @@ pub fn save_discovered(list: &[Profile]) -> usize {
         }
     }
     n
+}
+
+/// 一份声明对应的文件名主体：`{VID}-{PID}` 或 `{VID}-{PID}-{电量 feature}`。
+///
+/// feature 后缀不能省：同一个接收器上可能挂着用不同 feature 的两台设备，
+/// 那就得有两份声明。不带后缀的话第二份会被「已存在」挡掉，等于白认一台。
+fn slug(p: &Profile) -> String {
+    match p.battery_feature {
+        Some(f) => format!("{:04X}-{:04X}-{f:04X}", p.vid, p.pid),
+        None => format!("{:04X}-{:04X}", p.vid, p.pid),
+    }
+}
+
+/// 远程同步来的声明落盘：`%APPDATA%\PowerRing\devices\synced-*.yaml`。
+///
+/// 和自动发现那份（auto-*.yaml）最大的区别是**远程清单是权威的**：
+/// - 内容变了就覆盖，不学 auto-* 那样「已存在就跳过」—— 远程改对了，
+///   本地必须跟着改，否则等于没同步
+/// - 本次清单里没有的 synced-* 一律删掉。远程撤掉一份错声明，
+///   本地还留着就是继续用错的
+///
+/// 返回（新增的份数，更新的份数）
+pub fn save_synced(list: &[Profile]) -> (usize, usize) {
+    let Some(dir) = user_devices_dir() else {
+        return (0, 0);
+    };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        warn!("[profile] 建不了用户声明目录 {:?}：{e}", dir);
+        return (0, 0);
+    }
+    let mut added = 0;
+    let mut updated = 0;
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in list {
+        let file = format!("synced-{}.yaml", slug(p));
+        keep.insert(file.clone());
+        let path = dir.join(&file);
+        let text = to_yaml(p, NOTE_SYNCED);
+        // 内容没变就不写：省一次磁盘写入，也让文件时间戳老实待着 ——
+        // 用户可能正盯着这个目录排查问题，每次同步都跳一遍时间戳会误导他
+        match fs::read_to_string(&path) {
+            Ok(old) if old == text => continue,
+            Ok(_) => updated += 1,
+            Err(_) => added += 1,
+        }
+        match fs::write(&path, text) {
+            Ok(()) => info!("[profile] 同步声明 {file}"),
+            Err(e) => warn!("[profile] 写不进 {:?}：{e}", path),
+        }
+    }
+    // 清理：本次清单里没有的 synced-* 全部删掉
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("synced-") && name.ends_with(".yaml") && !keep.contains(&name) {
+                match fs::remove_file(e.path()) {
+                    Ok(()) => info!("[profile] 远程清单里没有了，删掉旧的 {name}"),
+                    Err(err) => warn!("[profile] 删不掉 {name}：{err}"),
+                }
+            }
+        }
+    }
+    (added, updated)
 }
 
 /// 用户目录：%APPDATA%\PowerRing\devices
@@ -374,11 +459,30 @@ fn user_devices_dir() -> Option<PathBuf> {
     Some(PathBuf::from(app).join("PowerRing").join("devices"))
 }
 
+/// 自动发现生成的文件头：说清它是怎么来的、能不能删
+const NOTE_DISCOVERED: &str = "\
+# 由 PowerRing 自动发现生成：这台设备不在内置名单里，
+# 程序用公开标准探测到它能报电量，于是记在这里。
+# 这个文件可以随便删，删了下次启动会重新探测一遍。
+# 想让更多人用上它，把这个文件的内容贴到项目的 Issue 里就行。
+";
+
+/// 远程同步生成的文件头。措辞必须和上面那份不一样：
+/// 同步来的会被下次同步覆盖，写「可以随便改」是害人 —— 改了也白改，
+/// 而他真正该知道的「怎么才能改得住」又没写进去
+const NOTE_SYNCED: &str = "\
+# 由 PowerRing 从远程清单同步：项目里已经适配好、验证过的设备声明。
+# 这个文件由托盘菜单里的「检查设备声明更新…」维护，**手改会被下次同步覆盖**。
+# 想改就另存一个别的名字放在同一个目录下（比如 my-xxx.yaml），那份不会被覆盖。
+# 不需要它就整个删掉；只要它还在远程清单里，下次同步还会再拉回来。
+";
+
 /// 把一份声明写成 YAML 文本。
 ///
-/// 手写而不走 serde 是有意的：文件里要带上「这是自动生成的、可以删」的说明，
+/// 手写而不走 serde 是有意的：文件里要带上「这是怎么来的、能不能改」的说明，
 /// 序列化出来的东西没法夹带这些话，而恰恰是这些话决定了用户敢不敢动手改。
-fn to_yaml(p: &Profile) -> String {
+/// `note` 就是那段说明，两种来源的说法不一样（见上面两个常量）。
+fn to_yaml(p: &Profile, note: &str) -> String {
     let name = yaml_string(&p.name);
     let protocol = match p.protocol {
         Protocol::Hidpp20 => "hid++2.0",
@@ -394,10 +498,8 @@ fn to_yaml(p: &Profile) -> String {
         BatteryKind::Percent => "percent",
     };
     let mut s = String::new();
-    s.push_str("# 由 PowerRing 自动发现生成：这台设备不在内置名单里，\n");
-    s.push_str("# 程序用公开标准探测到它能报电量，于是记在这里。\n");
-    s.push_str("# 这个文件可以随便删，删了下次启动会重新探测一遍。\n");
-    s.push_str("# 想让更多人用上它，把这个文件的内容贴到项目的 Issue 里就行。\n\n");
+    s.push_str(note);
+    s.push('\n');
     s.push_str(&format!("name: {name}\n"));
     s.push_str(&format!("protocol: {protocol}\n"));
     s.push_str(&format!("transport: {transport}\n"));
@@ -513,4 +615,87 @@ fn load_from(dir: &Path) -> Vec<Profile> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 从一段清单文本里取出第一份声明
+    fn first(text: &str) -> Profile {
+        parse_bundle(text).expect("这一份应该能用").remove(0)
+    }
+
+    fn ble() -> Profile {
+        first(
+            "devices:\n  - name: \"测试设备\"\n    protocol: \"ble\"\n    match:\n      vendor_id: \"0x045E\"\n      product_id: \"0x0B13\"\n    battery:\n      kind: \"percent\"\n",
+        )
+    }
+
+    /// 这条测的不是代码，是**生成脚本和解析端对不对得上**：
+    /// tools/build_remote.py 改了缩进或结构，这里第一时间红，
+    /// 总好过等真有人点了「检查更新」才发现拉下来解析不了
+    #[test]
+    fn 仓库里的远程清单能被解析() {
+        let text = std::fs::read_to_string("remote/devices.yaml")
+            .expect("读不到 remote/devices.yaml，先跑一次 tools/build_remote.py");
+        let list = parse_bundle(&text).expect("仓库里那份清单解析不了");
+        assert!(
+            list.len() >= 4,
+            "清单里至少要有 4 份声明，实际 {}",
+            list.len()
+        );
+        for p in &list {
+            assert!(!p.name.is_empty(), "有一份声明没写名字");
+            assert!(!p.protocol_source.is_empty(), "{} 没写协议来源", p.name);
+        }
+    }
+
+    #[test]
+    fn 清单里有一份坏的不影响其它() {
+        let text = "devices:\
+            \n  - name: \"坏设备\"\
+            \n    protocol: \"瞎写的协议\"\
+            \n    match:\
+            \n      vendor_id: \"0x046D\"\
+            \n      product_id: \"0xC539\"\
+            \n    battery:\
+            \n      kind: \"voltage\"\
+            \n  - name: \"好设备\"\
+            \n    protocol: \"ble\"\
+            \n    match:\
+            \n      vendor_id: \"0x045E\"\
+            \n      product_id: \"0x0B13\"\
+            \n    battery:\
+            \n      kind: \"percent\"\n";
+        let list = parse_bundle(text).expect("还剩一份能用的，不该整个失败");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "好设备");
+    }
+
+    #[test]
+    fn 空清单要报错而不是当成零台设备() {
+        assert!(parse_bundle("devices: []").is_err());
+        // devices 后面什么都没有 —— 生成脚本万一写出这种东西，也得是错的
+        assert!(parse_bundle("devices:").is_err());
+    }
+
+    #[test]
+    fn 整个文件不是清单时要报错() {
+        assert!(parse_bundle("这根本不是 YAML：[[[").is_err());
+        // 单份声明文件（没有 devices: 那一层）也不能被当成空清单蒙混过关
+        assert!(parse_bundle("name: \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn 文件名主体带电量feature() {
+        let mut p = ble();
+        p.vid = 0x046D;
+        p.pid = 0xC539;
+        p.battery_feature = Some(0x1001);
+        assert_eq!(slug(&p), "046D-C539-1001");
+        // 没有 feature 的设备（比如蓝牙自报百分比的）不能多个尾巴
+        p.battery_feature = None;
+        assert_eq!(slug(&p), "046D-C539");
+    }
 }

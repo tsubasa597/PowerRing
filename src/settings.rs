@@ -79,12 +79,13 @@ const ID_NOTIFY: isize = 1030;
 const ID_TEST: isize = 1040;
 const ID_AUTO: isize = 1050;
 const ID_THEME: isize = 1060;
+const ID_SYNC_URL: isize = 1070;
 
 // 96 DPI 下的**客户区**布局，实际按 DPI 放大。
 // 注意这是客户区（放控件的那块），不是窗口外框 —— 外框还要再加标题栏和边框，
 // 由 outer_size() 负责换算，别直接拿它去 CreateWindowExW。
 const BASE_W: f32 = 340.0;
-const BASE_H: f32 = 316.0;
+const BASE_H: f32 = 370.0;
 const MARGIN: f32 = 16.0;
 const ROW_TOP: f32 = 20.0;
 const ROW_PITCH: f32 = 36.0;
@@ -92,8 +93,13 @@ const LABEL_W: f32 = 178.0;
 const EDIT_X: f32 = 200.0;
 const EDIT_W: f32 = 124.0;
 const EDIT_H: f32 = 24.0;
-/// 复选框紧跟三行输入框
-const CHECK_Y: f32 = ROW_TOP + ROW_PITCH * 3.0;
+/// 第 4 行是「设备声明更新地址」：标签单独占一行，输入框整行宽。
+/// 不做成「标签在左、输入框在右」是因为 URL 很长，
+/// 124px 那点宽度连一个地址的一半都显示不下
+const URL_LABEL_Y: f32 = 128.0;
+const URL_EDIT_Y: f32 = 150.0;
+/// 复选框紧跟地址那一行
+const CHECK_Y: f32 = 186.0;
 const CHECK_H: f32 = 24.0;
 /// 复选框给它右边的「试一次」按钮让出位置
 const CHECK_W: f32 = BASE_W - MARGIN * 2.0 - 68.0;
@@ -103,8 +109,8 @@ const TEST_X: f32 = MARGIN + CHECK_W + 8.0;
 const CHECK2_Y: f32 = CHECK_Y + 30.0;
 /// 主题切换按钮占整行，挨着自启
 const THEME_Y: f32 = CHECK2_Y + 30.0;
-const STATUS_Y: f32 = 222.0;
-const BTN_Y: f32 = 266.0;
+const STATUS_Y: f32 = 288.0;
+const BTN_Y: f32 = 320.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 30.0;
 const BTN_GAP: f32 = 16.0;
@@ -122,6 +128,11 @@ static HW_AUTO: AtomicIsize = AtomicIsize::new(0);
 static NOTIFY_CHECK: AtomicBool = AtomicBool::new(true);
 static AUTO_CHECK: AtomicBool = AtomicBool::new(false);
 static HW_THEME: AtomicIsize = AtomicIsize::new(0);
+static HW_SYNC_URL: AtomicIsize = AtomicIsize::new(0);
+/// 「检查设备声明更新…」用的地址。留空表示用程序内置的那两个。
+/// 用锁而不是 Atomic 是因为它是个字符串；用 String 而不是 &'static str
+/// 是因为它每次保存都可能变
+static SYNC_URL: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 // WM_CTLCOLOR 要返回一个画刷，而系统在返回之后还要用它 —— 不能每次现造现删。
 // 所以缓存一个，颜色变了才重建（切换主题时 key 变化，旧的被删掉）
 static BRUSH_WIN: AtomicIsize = AtomicIsize::new(0);
@@ -138,6 +149,17 @@ static LOW_CRITICAL: AtomicU8 = AtomicU8::new(10);
 static NOTIFY: AtomicBool = AtomicBool::new(true);
 /// 设置窗口里点了「试一次」
 static TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 声明更新的来源地址。留空时 sync 模块会用内置的两个源
+pub fn sync_url() -> String {
+    SYNC_URL.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+pub fn set_sync_url(v: String) {
+    if let Ok(mut s) = SYNC_URL.lock() {
+        *s = v;
+    }
+}
 
 fn hwnd() -> HWND {
     HWND(HW.load(Ordering::SeqCst) as *mut core::ffi::c_void)
@@ -398,6 +420,35 @@ pub fn create() -> Result<(), windows::core::Error> {
         set_font(theme_btn, font);
         HW_THEME.store(theme_btn.0 as isize, Ordering::SeqCst);
 
+        // 「设备声明更新地址」：默认留空（用内置的两个源），
+        // 只有连不上 GitHub 的人才需要填。把它摆在设置窗口里而不是藏得更深，
+        // 是因为要填它的人恰恰是那批最着急的 —— 让他们翻三层菜单是折磨
+        let url_label = make(
+            w!("STATIC"),
+            "设备声明更新地址（留空则用默认）",
+            WS_CHILD | WS_VISIBLE,
+            px(MARGIN),
+            px(URL_LABEL_Y),
+            px(BASE_W - MARGIN * 2.0),
+            px(20.0),
+            wnd,
+            0,
+        );
+        let url_edit = make(
+            w!("EDIT"),
+            "",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
+            px(MARGIN),
+            px(URL_EDIT_Y),
+            px(BASE_W - MARGIN * 2.0),
+            px(EDIT_H),
+            wnd,
+            ID_SYNC_URL,
+        );
+        set_font(url_label, font);
+        set_font(url_edit, font);
+        HW_SYNC_URL.store(url_edit.0 as isize, Ordering::SeqCst);
+
         let status = make(
             w!("STATIC"),
             "",
@@ -450,6 +501,7 @@ pub fn open() {
         set_text(ctl(&HW_WARN), &cfg.low_warn.to_string());
         set_text(ctl(&HW_CRITICAL), &cfg.low_critical.to_string());
         set_text(ctl(&HW_STATUS), "");
+        set_text(ctl(&HW_SYNC_URL), &cfg.remote_devices_url);
         NOTIFY_CHECK.store(cfg.notify_enabled, Ordering::SeqCst);
 
         // 自启这一格的勾选状态问注册表，不问 config —— 用户可能在设置之外改过它
@@ -518,6 +570,15 @@ fn on_save() {
         return;
     }
 
+    // 更新地址留空是合法的（那就用内置的两个源），填了就得以 http(s):// 开头。
+    // 在这里挡一道，而不是等人点了「检查更新」才发现地址写错了 ——
+    // 那要白等好几轮超时才等得到一句报错
+    let url = text_of(ctl(&HW_SYNC_URL)).trim().to_string();
+    if !url.is_empty() && !url.starts_with("https://") && !url.starts_with("http://") {
+        set_status("更新地址要以 https:// 开头；不需要就留空");
+        return;
+    }
+
     let mut cfg = Config::load();
     // 两格的勾选状态读我们自己那份（控件已经不认 BM_GETCHECK 了）
     let notify = NOTIFY_CHECK.load(Ordering::SeqCst);
@@ -533,10 +594,12 @@ fn on_save() {
     cfg.autostart = auto;
     // 主题是点了就生效的，保存时把此刻的模式记下来就行
     cfg.theme = theme::current_mode().as_str().to_string();
+    cfg.remote_devices_url = url.clone();
     cfg.save();
     set_interval(interval);
     set_low(warn, critical);
     set_notify(notify);
+    set_sync_url(url.clone());
 
     // 这句提示有实际用处：勾回开关的当下不会补弹一张旧提醒（那次跨档早就过去了），
     // 不说清楚的话，用户点了保存却发现啥也没弹，只会以为开关没生效
@@ -567,8 +630,8 @@ fn on_save() {
     }
     set_status(&tip);
     info!(
-        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）主题={}",
-        interval, warn, critical, notify, auto, auto_was, cfg.theme
+        "[settings] 保存配置：间隔={}s 警告={}% 严重={}% 提醒={} 自启={}（原 {}）主题={} 更新地址={:?}",
+        interval, warn, critical, notify, auto, auto_was, cfg.theme, url
     );
 }
 
@@ -743,7 +806,10 @@ fn set_status(text: &str) {
 }
 
 fn text_of(hw: HWND) -> String {
-    let mut buf = [0u16; 32];
+    // 512 不是为了省内存，是为了装得下一个 URL：设置里那格要放完整的地址，
+    // 按早先的 32 长度读会被截到 31 个字符 —— 存下去的是半个地址，
+    // 而输入框里看着是完整的，用户根本想不到问题出在这
+    let mut buf = [0u16; 512];
     let n = unsafe { GetWindowTextW(hw, &mut buf) };
     if n <= 0 {
         return String::new();
