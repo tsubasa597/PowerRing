@@ -4,7 +4,7 @@
 
 Battery monitor for wireless peripherals on Windows. A ring in the tray tells you how much juice your mouse and headset have left — without installing one vendor app per brand.
 
-- **Single ~0.9 MB exe**, portable, no admin rights needed
+- **Single ~1 MB exe**, portable, no admin rights needed
 - **No network, no account, no telemetry** — everything stays on your machine
 - **Adding a device = adding a YAML file**, no code changes (see [Adding a device](#adding-a-device))
 
@@ -16,7 +16,7 @@ Battery monitor for wireless peripherals on Windows. A ring in the tray tells yo
 
 | Feature | Notes |
 | --- | --- |
-| Tray battery ring | Ring fill maps to remaining charge. Green → yellow → red as it drains, blue while charging. **Unreadable is shown as a grey ring — never as 0%** |
+| Tray battery ring | Ring fill maps to remaining charge. Green → orange → red as it drains, blue while charging. **Unreadable is shown as a grey ring — never as 0%** |
 | Hover readout | Shows percentage per device. With multiple devices it uses short names, sorted lowest first |
 | Left click | Toggles the battery panel with every device's full name and level |
 | Right click menu | Show panel / Refresh now / Settings… / Exit |
@@ -182,7 +182,7 @@ Needs a Rust toolchain (Windows defaults to `x86_64-pc-windows-msvc`, which requ
 cargo build --release
 ```
 
-Output: `target/release/powerring.exe` (~0.9 MB).
+Output: `target/release/powerring.exe` (~1 MB).
 
 ## Protocol notes worth knowing
 

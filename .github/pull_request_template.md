@@ -19,7 +19,7 @@ UI 改动请附截图 —— 托盘图标、面板、设置窗口各会盖到
 -->
 
 - [ ] `cargo fmt` 已跑
-- [ ] `cargo clippy -- -D warnings` 无告警
+- [ ] `cargo clippy --all-targets -- -D warnings` 无告警（别漏 `--all-targets`，否则查不到 `examples/` 和测试）
 - [ ] `cargo test` 通过
 - [ ] release 产物体积没有失控（验收线 5 MB）
 - [ ] 新设备的 `protocol_source` 与 `verification` 都填了

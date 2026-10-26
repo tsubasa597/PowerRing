@@ -85,7 +85,7 @@ commit 里值得写「为什么」。**这个项目里最有价值的注释解�
 
 - [ ] `cargo fmt` 已跑过，`cargo clippy --all-targets -- -D warnings` 无告警
 - [ ] `cargo test` 通过；改了换算逻辑的话补了单元测试
-- [ ] release 产物体积没有失控（验收线 5 MB，目前约 0.9 MB）
+- [ ] release 产物体积没有失控（验收线 5 MB，目前约 1 MB）
 - [ ] 没引入新的依赖，或者能说清楚为什么非加不可
 - [ ] 新设备的 `protocol_source` 和 `verification` 都填了
 
