@@ -102,6 +102,26 @@ If you would rather verify it yourself: the source is public at
 - Do not extract into a new folder: the autostart registry entry still points at the old path, so you end up with two copies running — and you will be looking at the old one
 - Overwriting is safe: declarations you added or edited under `%APPDATA%\PowerRing\devices` are left alone
 
+### New devices from other people, without upgrading
+
+Device declarations (how to read the battery of a given device) used to ship only with the exe:
+recognising a new device meant waiting for a new release. There is now a second path —
+**right-click the tray icon → Check for device profile updates…** pulls the latest list
+from the project, saves it locally, and it **takes effect immediately, no restart needed**.
+
+- **If you do not click it, it does not touch the network.** This is the only place in the
+  program that sends a request. No background network, no telemetry
+- **If it cannot reach the server, nothing was updated** — devices already recognised keep
+  working. On machines that cannot reach GitHub it simply never succeeds; that is the network
+  environment, not a broken program. In that case new devices still require upgrading the exe
+- The list is validated entry by entry; one broken entry is skipped. A bad entry upstream
+  cannot leave you with no devices at all
+- Files land in `%APPDATA%\PowerRing\devices\synced-*.yaml`. **Do not hand-edit these** —
+  the next sync overwrites them. To customise one, save a copy under a different name in the
+  same folder; that one is left alone
+- Cannot reach GitHub but still want this? Settings lets you enter an address you can reach;
+  when set, it takes priority
+
 ## Adding a device
 
 Copy the closest YAML in `devices/` and edit a few lines. **No Rust code changes required.** Three flavours:

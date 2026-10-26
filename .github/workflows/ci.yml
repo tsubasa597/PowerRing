@@ -26,6 +26,12 @@ jobs:
       - name: 格式检查
         run: cargo fmt --all -- --check
 
+      # 加过设备却忘了重新生成 remote/devices.yaml 的话，结果是
+      # 「仓库里有这份声明，别人同步时却拿不到」—— 不报错，只是安静地少一台设备。
+      # 这一步专门卡它
+      - name: 远程清单是最新的
+        run: python tools/build_remote.py --check
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
