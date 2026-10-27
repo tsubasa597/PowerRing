@@ -55,6 +55,9 @@ const PLAUSIBLE_MV: std::ops::RangeInclusive<u16> = 2500..=5000;
 ///
 /// 百分比式没有可校验的东西（0..100 本来就全覆盖），只有电压式能看数值像不像电压。
 fn plausible(b: &Battery, kind: BatteryKind) -> bool {
+    if !matches!(b.percent, Some(0..=100)) {
+        return false;
+    }
     match kind {
         BatteryKind::Voltage => PLAUSIBLE_MV.contains(&b.mv),
         BatteryKind::Percent => true,
@@ -353,12 +356,12 @@ mod tests {
     #[test]
     fn 电压式只认像电压的数() {
         let good = Battery {
-            percent: 88,
+            percent: Some(88),
             mv: 4050,
             charging: false,
         };
         let zero = Battery {
-            percent: 0,
+            percent: Some(0),
             mv: 0,
             charging: false,
         };
@@ -366,12 +369,12 @@ mod tests {
         assert!(!plausible(&zero, BatteryKind::Voltage));
         // 边界：锂电放空与满电的两端都要算合理
         let low = Battery {
-            percent: 1,
+            percent: Some(1),
             mv: 2500,
             charging: false,
         };
         let high = Battery {
-            percent: 100,
+            percent: Some(100),
             mv: 5000,
             charging: false,
         };

@@ -61,7 +61,7 @@ pub enum BatteryKind {
 #[derive(Debug, Clone, Copy)]
 pub struct Battery {
     /// 电量百分比
-    pub percent: u8,
+    pub percent: Option<u8>,
     /// 毫伏（电压式设备才有意义）
     pub mv: u16,
     /// 是否正在充电
@@ -196,7 +196,7 @@ impl Hidpp {
         }
         let mv = ((r[4] as u16) << 8) | r[5] as u16;
         Some(Battery {
-            percent: mv_to_percent(mv),
+            percent: Some(mv_to_percent(mv)),
             mv,
             charging: r[6] & 0x80 != 0,
         })
@@ -210,7 +210,7 @@ impl Hidpp {
             return None;
         }
         Some(Battery {
-            percent: r[4],
+            percent: Some(r[4]),
             mv: 0,
             charging: r[5] & 0x80 != 0,
         })

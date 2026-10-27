@@ -60,7 +60,8 @@ pub fn build(api: &HidApi, known: &[Known]) -> String {
         for k in known {
             let pct = match k.percent {
                 Some(p) => format!("{p}%"),
-                None => "未连接".to_string(),
+                None if k.charging => "电量未知".to_string(),
+                None => "未知或未连接".to_string(),
             };
             let _ = writeln!(
                 s,

@@ -117,12 +117,25 @@ fn ring_icon(percent: Option<u8>, charging: bool) -> Icon {
 /// 读数滞回：变化不足 2 个百分点就不动。
 /// 原因（M0.5 实测）：电压有 1mV 抖动，正好压在放电曲线档位边界上，
 /// 不做平滑会让百分比在 27% 和 28% 之间反复横跳。
-fn smooth(shown: Option<u8>, fresh: u8) -> u8 {
+fn smooth(shown: Option<u8>, fresh: u8, voltage: bool) -> u8 {
+    if !voltage || matches!(fresh, 0 | 100) {
+        return fresh;
+    }
     match shown {
         None => fresh,
+        Some(s) if tier_of(Some(s), false) != tier_of(Some(fresh), false) => fresh,
         Some(s) if (fresh as i16 - s as i16).abs() >= 2 => fresh,
         Some(s) => s,
     }
+}
+
+/// 电量与充电状态取自同一台设备。
+fn ring_status(list: &[Status]) -> (Option<u8>, bool) {
+    list.iter()
+        .filter(|s| !s.offline && s.percent.is_some())
+        .min_by_key(|s| (s.percent, s.charging))
+        .map(|s| (s.percent, s.charging))
+        .unwrap_or((None, false))
 }
 
 /// 取走并处理本线程消息队列里的所有消息。
@@ -189,6 +202,7 @@ fn tip_line(s: &Status, name: &str) -> String {
     }
     match s.percent {
         Some(p) => format!("{} {}%{}", name, p, if s.charging { " 充电" } else { "" }),
+        None if s.charging => format!("{} 充电中（电量未知）", name),
         None => format!("{} --", name),
     }
 }
@@ -214,6 +228,7 @@ fn popup_lines(list: &[Status]) -> Vec<Line> {
                         p,
                         if s.charging { "  充电中" } else { "" }
                     ),
+                    None if s.charging => format!("{}  充电中（电量未知）", s.name),
                     None => format!("{}  --", s.name),
                 }
             },
@@ -452,6 +467,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         struct Watched {
             dev: device::Device,
             percent: Option<u8>,
+            raw_percent: Option<u8>,
+            last_read: Option<Instant>,
             charging: bool,
             /// 两档提醒各自的弹药
             arm_critical: Arm,
@@ -502,7 +519,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// 只在**向下跨档**时提醒，且每档只响一次。回升 3 个百分点才重新装弹 ——
         /// 电压有 ±1% 抖动（M0.5 实测），不留缓冲会在 20/21 之间每 60 秒弹一次。
         fn check_alert(w: &mut Watched, fresh: bool) -> Option<Alert> {
-            let percent = w.percent?;
             let critical = settings::low_critical();
             let warn = settings::low_warn();
             // 插上电就算满血：两档都装满，拔线放光后还能再提醒
@@ -511,6 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 w.arm_warn = Arm::Armed;
                 return None;
             }
+            let percent = w.raw_percent?;
             // 刚开机（或刚扫到的设备）：在阈值之上就装弹，在阈值之下算「已弹过」——
             // 开机时就是 8% 属于既有状态，不是刚跌破，不该一上来就弹
             if fresh {
@@ -617,6 +634,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|d| Watched {
                 dev: d,
                 percent: None,
+                raw_percent: None,
+                last_read: None,
                 charging: false,
                 arm_critical: Arm::Armed,
                 arm_warn: Arm::Armed,
@@ -649,6 +668,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|d| Watched {
                             dev: d,
                             percent: None,
+                            raw_percent: None,
+                            last_read: None,
                             charging: false,
                             arm_critical: Arm::Armed,
                             arm_warn: Arm::Armed,
@@ -693,6 +714,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     watched.push(Watched {
                         dev: d,
                         percent: None,
+                        raw_percent: None,
+                        last_read: None,
                         charging: false,
                         arm_critical: Arm::Armed,
                         arm_warn: Arm::Armed,
@@ -711,11 +734,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         w.offline = false;
                         w.detached = false;
                         // 是不是这台设备的第一次读数：弹药的初始状态由它决定
-                        let fresh = w.percent.is_none();
-                        if w.percent.map(|p| p != b.percent).unwrap_or(true) {
-                            info!("[battery] {} → {} mV {}%", w.dev.name, b.mv, b.percent);
+                        let fresh =
+                            w.last_read.is_none() || (w.raw_percent.is_none() && !w.charging);
+                        if w.raw_percent != b.percent {
+                            info!("[battery] {} → {} mV {:?}%", w.dev.name, b.mv, b.percent);
                         }
-                        w.percent = Some(smooth(w.percent, b.percent));
+                        w.raw_percent = b.percent;
+                        w.percent = b
+                            .percent
+                            .map(|p| smooth(w.percent, p, w.dev.uses_voltage()));
+                        w.last_read = Some(Instant::now());
                         w.charging = b.charging;
                         if let Some(a) = check_alert(w, fresh) {
                             alerts.push(a);
@@ -826,7 +854,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 未连接的设备不算「还没读出来」—— 它读出来过，只是现在联系不上。
             // 算进去的话轮询会永久卡在 5 秒一輪，白费力气
             let still_pending =
-                watched.is_empty() || watched.iter().any(|w| w.percent.is_none() && !w.offline);
+                watched.is_empty() || watched.iter().any(|w| w.last_read.is_none() && !w.offline);
             // 有设备刚读失败、还在等第二次确认：别等满一个周期，否则关机后
             // 两次确认之间又要白等 30 秒，用户会以为程序没反应
             let confirming = watched.iter().any(|w| w.misses > 0);
@@ -1302,9 +1330,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dark = theme::is_dark();
         if dark != seen_dark {
             seen_dark = dark;
-            let lowest = latest.iter().filter_map(|s| s.percent).min();
-            let any_charging = latest.iter().any(|s| s.charging);
-            if let Err(e) = tray.set_icon(Some(ring_icon(lowest, any_charging))) {
+            let (lowest, charging) = ring_status(&latest);
+            if let Err(e) = tray.set_icon(Some(ring_icon(lowest, charging))) {
                 warn!("[tray] 换配色后重设图标失败：{e}");
             }
             popup::repaint();
@@ -1320,10 +1347,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if changed {
             // tooltip 逐台列出；托盘图标取**电量最低**的那台（最需要被看到的那个）
             let tip = tooltip_of(&latest);
-            let lowest = latest.iter().filter_map(|s| s.percent).min();
-            let any_charging = latest.iter().any(|s| s.charging);
+            let (lowest, charging) = ring_status(&latest);
 
-            if let Err(e) = tray.set_icon(Some(ring_icon(lowest, any_charging))) {
+            if let Err(e) = tray.set_icon(Some(ring_icon(lowest, charging))) {
                 warn!("[tray] set_icon 失败：{e}");
             }
             if let Err(e) = tray.set_tooltip(Some(&tip)) {
@@ -1350,6 +1376,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::{tooltip_of, Status, SUBMIT_URL, TIP_MAX_CHARS};
+
+    #[test]
+    fn 充电未知不会显示满电() {
+        let mut status = s("耳机", "耳机", None);
+        status.charging = true;
+        assert_eq!(tooltip_of(&[status]), "耳机 充电中（电量未知）");
+    }
+
+    #[test]
+    fn 其它设备充电不会掩盖最低电量() {
+        let low = s("鼠标", "鼠标", Some(5));
+        let mut charging = s("耳机", "耳机", Some(80));
+        charging.charging = true;
+        assert_eq!(super::ring_status(&[low, charging]), (Some(5), false));
+        let mut only = s("耳机", "耳机", Some(80));
+        only.charging = true;
+        assert_eq!(super::ring_status(&[only]), (Some(80), true));
+        assert_eq!(
+            super::ring_status(&[offline("鼠标", "鼠标")]),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn 直接百分比和端点立即更新() {
+        assert_eq!(super::smooth(Some(21), 20, false), 20);
+        assert_eq!(super::smooth(Some(99), 100, false), 100);
+        assert_eq!(super::smooth(Some(99), 100, true), 100);
+        assert_eq!(super::smooth(Some(1), 0, true), 0);
+        assert_eq!(super::smooth(Some(51), 50, true), 51);
+        assert_eq!(super::smooth(Some(21), 20, true), 20);
+        assert_eq!(super::smooth(Some(11), 10, true), 10);
+    }
 
     /// 收集页的链接是写死在程序里的，改的时候容易手滑：
     /// 少个 s、多截一个字符，点下去就是 404，而这个错只有真去点才会发现。

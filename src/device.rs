@@ -81,6 +81,16 @@ impl Device {
         }
     }
 
+    pub fn uses_voltage(&self) -> bool {
+        matches!(
+            self.link,
+            Link::Hidpp {
+                kind: BatteryKind::Voltage,
+                ..
+            }
+        )
+    }
+
     /// 收不到应答时，是不是**判断不了**它究竟关机了还是睡着了。
     ///
     /// HID 接收器设备：判断不了。接收器一直插在机器上，鼠标休眠和鼠标关机

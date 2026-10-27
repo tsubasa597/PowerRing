@@ -170,7 +170,7 @@ impl Dev {
         }
         let percent = self.raw()?;
         Some(Battery {
-            percent,
+            percent: Some(percent),
             mv: 0,
             charging: false,
         })

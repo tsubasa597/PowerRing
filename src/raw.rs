@@ -49,26 +49,7 @@ impl RawDev {
             Ok(k) if k > 0 => &tmp[..k],
             _ => return None,
         };
-        if r.len() <= s.value_index {
-            return None;
-        }
-
-        let value = r[s.value_index];
-        let state = r.get(s.state_index).copied().unwrap_or(0);
-        let charging = s.charging_states.contains(&state);
-
-        let percent = if charging {
-            // 充电中：数值字节在这个状态下不代表电量，直接按满格显示。
-            // 环色会走「充电」那一档，具体数字不那么重要
-            100
-        } else {
-            lookup(&s.table, state, value)?
-        };
-        Some(Battery {
-            percent,
-            mv: 0,
-            charging,
-        })
+        parse_battery(s, r)
     }
 
     /// 扫描时用：能不能读到一条能解析的响应，就是「这台设备在不在」的证据。
@@ -88,11 +69,28 @@ impl RawDev {
     }
 }
 
+fn parse_battery(spec: &RawSpec, reply: &[u8]) -> Option<Battery> {
+    let state = *reply.get(spec.state_index)?;
+    let value = *reply.get(spec.value_index)?;
+    let charging = spec.charging_states.contains(&state);
+    let percent = if charging {
+        // 这个状态下数值字节没有电量语义，只能确认正在充电。
+        None
+    } else {
+        Some(lookup(&spec.table, state, value)?)
+    };
+    Some(Battery {
+        percent,
+        mv: 0,
+        charging,
+    })
+}
+
 /// 在分段表里查百分比：找到第一条「数值 ≤ 上界」就取它对应的百分比。
 /// 表为空时把数值当百分比直接返回（有些设备读到就是百分比，不需要换算）
 fn lookup(table: &[(u8, Vec<(u8, u8)>)], state: u8, value: u8) -> Option<u8> {
     if table.is_empty() {
-        return Some(value.min(100));
+        return (value <= 100).then_some(value);
     }
     let rows = table.iter().find(|(s, _)| *s == state)?.1.as_slice();
     for (hi, pct) in rows {
@@ -106,7 +104,29 @@ fn lookup(table: &[(u8, Vec<(u8, u8)>)], state: u8, value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::lookup;
+    use super::{lookup, parse_battery};
+    use crate::profile::RawSpec;
+
+    #[test]
+    fn 充电报文不能伪造满电且短响应不能猜状态() {
+        let spec = RawSpec {
+            request: vec![0x21, 0xFF, 5],
+            reply_len: 20,
+            state_index: 3,
+            value_index: 4,
+            charging_states: vec![0x10],
+            table: vec![],
+        };
+        let battery = parse_battery(&spec, &[0x21, 0, 0, 0x10, 255]).unwrap();
+        assert!(battery.charging);
+        assert_eq!(battery.percent, None);
+        assert!(parse_battery(&spec, &[0x21, 0, 0, 0x10]).is_none());
+        assert_eq!(
+            parse_battery(&spec, &[0x21, 0, 0, 0, 42]).unwrap().percent,
+            Some(42)
+        );
+        assert!(parse_battery(&spec, &[0x21, 0, 0, 0, 255]).is_none());
+    }
 
     #[test]
     fn 查表落在区间内() {
