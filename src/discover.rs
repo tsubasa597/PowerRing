@@ -35,12 +35,9 @@ const BATTERY_FEATURES: [(u16, BatteryKind); 2] = [
     (F_UNIFIED_BATTERY, BatteryKind::Percent),
 ];
 
-/// 直连设备（插线、或接收器已与设备配对成一台）用的 device index。
-/// M2 实测：直连时不挑 index，0x00–0xFF 全都响应，用 1 即可。
-pub(crate) const DIRECT_IDX: u8 = 1;
-/// 用来分辨接收器与直连设备的那个 index：故意取一个不是 1 的值，
-/// 只有「不挑 index 的直连设备」才会理它（见 `looks_direct`）
-const PROBE_IDX: u8 = 2;
+pub(crate) use crate::hidpp::DIRECT_IDX;
+/// HID++ 规定 0xFF 寻址直连设备或接收器本体，不会指向接收器上的某个外设 slot。
+const PROBE_IDX: u8 = DIRECT_IDX;
 /// 接收器上要逐个问的 slot。slot 会漂移（实测 GPW 从 3 漂到 2），所以全覆盖
 const RECEIVER_SLOTS: std::ops::RangeInclusive<u8> = 1..=6;
 
@@ -136,17 +133,20 @@ fn merge_by_feature(found: &[(u8, u16, BatteryKind)]) -> Vec<(u16, BatteryKind, 
 
 /// 这个接口是**接收器**还是**直连设备**？
 ///
-/// 判据：直连设备对每个 device index 都应答（M2 实测 0x00–0xFF 全响应，
-/// 回显请求里的 index），而接收器只对**已配对**的 slot 应答。
-/// 于是拿一个不是 1 的 index 去问：它答应，说明这个接口不挑 index，是直连。
+/// 问 0xFF 上有没有电量 feature，而不是拿合法的接收器 slot 2 试探。
+/// slot 2 有设备只能证明它配对过，不能证明整个接口是直连。
 ///
 /// 分错的代价并不对称：接收器被当成直连，就只按 index 1 读 —— 设备漂到别的 slot
 /// 就再也读不到（实测 GPW 的 slot 会漂）；直连被当成接收器，只是多问几个空 slot，
 /// 慢一点但结果一样。所以拿不准时宁可判成接收器。
 pub(crate) fn looks_direct(conn: &Hidpp) -> bool {
+    probes_direct(|idx, feature| conn.feature_index(idx, feature).is_some())
+}
+
+fn probes_direct(mut supports: impl FnMut(u8, u16) -> bool) -> bool {
     BATTERY_FEATURES
         .iter()
-        .any(|(f, _)| conn.feature_index(PROBE_IDX, *f).is_some())
+        .any(|(f, _)| supports(PROBE_IDX, *f))
 }
 
 /// 显示名：**设备自报的**那个优先。
@@ -217,7 +217,7 @@ pub fn find(api: &HidApi, declared: &[Profile]) -> Vec<Profile> {
             battery_feature: None,
             battery_kind: BatteryKind::Percent,
             raw: None,
-            slots: vec![1],
+            slots: vec![DIRECT_IDX],
             name_feature: None,
             identify_contains: None,
             protocol_source: "蓝牙 SIG 公开标准：Battery Service 0x180F / Battery Level 0x2A19"
@@ -352,6 +352,14 @@ fn hidpp_profile(
 mod tests {
     use super::*;
     use crate::hidpp::Battery;
+
+    #[test]
+    fn 接收器第二槽有设备不能被当成直连() {
+        assert!(!probes_direct(|idx, _| idx == 1 || idx == 2));
+        assert!(probes_direct(
+            |idx, feature| idx == 0xFF && feature == F_BATTERY_VOLTAGE
+        ));
+    }
 
     #[test]
     fn 电压式只认像电压的数() {

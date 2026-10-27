@@ -12,6 +12,8 @@ use hidapi::HidDevice;
 pub const F_BATTERY_VOLTAGE: u16 = 0x1001; // 电压式电量（GPW 走这条）
 pub const F_UNIFIED_BATTERY: u16 = 0x1004; // 统一电量（GPW 不支持）
 pub const F_DEVICE_NAME: u16 = 0x0005;
+/// HID++ 官方规范保留给直连设备及接收器本体的地址。
+pub const DIRECT_IDX: u8 = 0xFF;
 
 /// 电压(mV) → 电量百分比，线性插值。与 Python M0 验证版同一条曲线。
 const CURVE: [(u16, u8); 13] = [

@@ -589,7 +589,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// 认出来的会写进用户目录变成一份真声明，下次启动直接命中，不必再探测。
         /// `force` 只用于启动第一轮 —— 那时还没任何设备，认一遍最值。
         fn run_discover(
-            api: &HidApi,
+            api: &mut HidApi,
             profiles: &mut Vec<Profile>,
             last: &mut Instant,
             force: bool,
@@ -598,6 +598,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             *last = Instant::now();
+            device::refresh(api);
             let found = crate::discover::find(api, profiles);
             if found.is_empty() {
                 return;
@@ -612,7 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut profiles = profiles;
-        let api = match HidApi::new() {
+        let mut api = match HidApi::new() {
             Ok(a) => a,
             Err(e) => {
                 warn!("[hid] 初始化失败：{e}");
@@ -622,8 +623,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 自动发现：启动第一轮无条件试一次。设备是插着开机的，
         // 这时候认出来，用户第一次打开就不是空壳
         let mut last_discover = Instant::now();
-        run_discover(&api, &mut profiles, &mut last_discover, true);
-        let devices = device::scan(&api, &profiles);
+        run_discover(&mut api, &mut profiles, &mut last_discover, true);
+        let devices = device::scan(&mut api, &profiles);
         for d in &devices {
             info!("[scan] 发现设备：{}", d.name);
         }
@@ -657,8 +658,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 一台都没有，先想想是不是压根没被任何声明覆盖：
                 // 也许是新买的设备刚插上，也许是它开机晚了一步。
                 // 再认一次（频率由 run_discover 自己把着，不会每轮都发报文）
-                run_discover(&api, &mut profiles, &mut last_discover, false);
-                let fresh = device::scan(&api, &profiles);
+                run_discover(&mut api, &mut profiles, &mut last_discover, false);
+                let fresh = device::scan(&mut api, &profiles);
                 if !fresh.is_empty() {
                     for d in &fresh {
                         info!("[scan] 发现设备：{}", d.name);
@@ -693,11 +694,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 刚有设备消失时这个周期会临时压到 RETURN_WAIT —— 用户实测
                 // 「重开 ♪ 出现」要 50 秒，就是被 60 秒的周期卡住的
                 last_scan = Instant::now();
-                let rescanned = device::scan(&api, &profiles);
+                let rescanned = device::scan(&mut api, &profiles);
                 if reload_devices {
                     watched.retain(|w| {
                         profiles.contains(&w.dev.profile)
-                            || rescanned.iter().any(|d| d.name == w.dev.name)
+                            || rescanned.iter().any(|d| d.id == w.dev.id)
                     });
                 }
                 for d in rescanned {
@@ -707,7 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 旧句柄指向的是一个已经不存在的实例，永远不会再答话，
                     // 于是它会永远挂着「未连接」。趁它现在答话把句柄换成新的，
                     // 设备就不必经历「移出列表 — 重新发现」这一趟。
-                    if let Some(i) = watched.iter().position(|w| w.dev.name == d.name) {
+                    if let Some(i) = watched.iter().position(|w| w.dev.id == d.id) {
                         let w = &mut watched[i];
                         if w.offline || reload_devices {
                             info!("[scan] {} 重新连上了，换用新句柄", d.name);
@@ -890,6 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 连点几次会攒下多个信号，先排空，免得接下来几轮白转
                     while trig_rx.try_recv().is_ok() {}
                     info!("[poll] 收到刷新请求，立即读一次");
+                    last_scan = Instant::now() - RESCAN_EVERY;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -911,6 +913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .collect::<Vec<_>>();
                 info!("[report] 生成设备信息报表（当前 {} 台设备）", known.len());
+                device::refresh(&mut api);
                 if report_tx.send(crate::report::build(&api, &known)).is_err() {
                     break;
                 }

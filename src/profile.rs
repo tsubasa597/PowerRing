@@ -245,7 +245,7 @@ impl Raw {
         let slots = match (transport, self.slots.clone()) {
             (Transport::Receiver, Some(s)) if !s.is_empty() => s,
             (Transport::Receiver, _) => (1..=6u8).collect(),
-            (Transport::Direct, _) => vec![1],
+            (Transport::Direct, _) => vec![crate::hidpp::DIRECT_IDX],
         };
 
         let ident = self.identify.unwrap_or(RawIdentify {

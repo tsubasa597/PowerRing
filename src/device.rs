@@ -33,6 +33,8 @@ enum Link {
 }
 
 pub struct Device {
+    /// 仅在进程内使用，不导出设备路径或蓝牙标识。
+    pub id: String,
     pub profile: Profile,
     /// 显示名：优先用设备自报的名字，取不到才用声明名
     pub name: String,
@@ -135,7 +137,8 @@ impl Device {
 }
 
 /// 按声明扫描本机所有受支持设备
-pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
+pub fn scan(api: &mut HidApi, profiles: &[Profile]) -> Vec<Device> {
+    refresh(api);
     // 同一个 HID 接口可能被多份声明引用（一个接收器上挂着多台设备），只打开一次
     let mut opened: HashMap<String, Rc<Hidpp>> = HashMap::new();
     // raw 设备按「接口 + 声明」缓存：一份声明对应一种报文格式，不能共用
@@ -198,12 +201,18 @@ pub fn scan(api: &HidApi, profiles: &[Profile]) -> Vec<Device> {
                             d
                         }
                     };
-                    scan_raw(&dev, prof, &rkey, &mut seen, &mut out);
+                    scan_raw(&dev, prof, &format!("{key}#raw"), &mut seen, &mut out);
                 }
             }
         }
     }
     out
+}
+
+pub fn refresh(api: &mut HidApi) {
+    if let Err(e) = api.refresh_devices() {
+        warn!("[scan] 刷新 HID 枚举失败：{e}");
+    }
 }
 
 /// 蓝牙设备的扫描。**每轮都重新枚举**，不像 HID 那样跨轮缓存句柄 ——
@@ -227,11 +236,12 @@ fn scan_ble(prof: &Profile, seen: &mut HashSet<String>, out: &mut Vec<Device>) {
         if !dev.probe() {
             continue;
         }
-        let key = format!("ble#{:04X}-{:04X}", node.vid, node.pid);
-        if !seen.insert(key) {
+        let key = format!("ble#{}", node.id);
+        if !seen.insert(key.clone()) {
             continue;
         }
         out.push(Device {
+            id: key,
             profile: prof.clone(),
             // 用系统在蓝牙里认到的名字，比声明里的名字更贴用户看到的那台设备
             name: if node.name.is_empty() {
@@ -265,6 +275,7 @@ fn scan_raw(
         return;
     }
     out.push(Device {
+        id: key.to_string(),
         profile: prof.clone(),
         short: prof.short_name.clone().unwrap_or_else(|| prof.name.clone()),
         name: prof.name.clone(),
@@ -285,7 +296,7 @@ fn scan_hidpp(
     };
     let idxs: Vec<u8> = match prof.transport {
         Transport::Receiver => prof.slots.clone(),
-        Transport::Direct => vec![1],
+        Transport::Direct => vec![crate::hidpp::DIRECT_IDX],
     };
 
     for dev_idx in idxs {
@@ -293,7 +304,7 @@ fn scan_hidpp(
             continue;
         }
         let uniq = format!("{path_key}#{dev_idx}");
-        if !seen.insert(uniq) {
+        if seen.contains(&uniq) {
             continue;
         }
 
@@ -316,7 +327,9 @@ fn scan_hidpp(
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| prof.name.clone());
 
+        seen.insert(uniq.clone());
         out.push(Device {
+            id: uniq,
             profile: prof.clone(),
             short: prof.short_name.clone().unwrap_or_else(|| name.clone()),
             name,

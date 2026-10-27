@@ -22,7 +22,9 @@ use std::fmt::Write as _;
 
 use hidapi::{DeviceInfo, HidApi};
 
-use crate::discover::{best_name, looks_direct, try_direct, try_receiver, HIDPP_VENDORS};
+use crate::discover::{
+    best_name, looks_direct, try_direct, try_receiver, DIRECT_IDX, HIDPP_VENDORS,
+};
 use crate::hidpp::{BatteryKind, Hidpp};
 use crate::warn;
 
@@ -163,7 +165,7 @@ fn hidpp_line(api: &HidApi, info: &DeviceInfo) -> String {
             Some((feat, kind)) => format!(
                 "HID++：直连，支持电量 {feat:#06X}（{}），设备自报“{}”",
                 kind_name(kind),
-                best_name(&conn, 1, "（读不到名字）".into())
+                best_name(&conn, DIRECT_IDX, "（读不到名字）".into())
             ),
             None => "HID++：答应探测，但读不到电量".to_string(),
         }
