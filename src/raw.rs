@@ -11,7 +11,7 @@
 
 use hidapi::HidDevice;
 
-use crate::hidpp::Battery;
+use crate::hidpp::{Battery, ReadingSource};
 use crate::profile::RawSpec;
 
 pub struct RawDev {
@@ -83,6 +83,7 @@ fn parse_battery(spec: &RawSpec, reply: &[u8]) -> Option<Battery> {
         percent,
         mv: 0,
         charging,
+        source: ReadingSource::Live,
     })
 }
 

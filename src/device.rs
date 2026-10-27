@@ -78,7 +78,7 @@ impl Device {
                 dev_idx,
                 feature,
                 ..
-            } => conn.feature_index(*dev_idx, *feature).is_some(),
+            } => conn.query_feature_index(*dev_idx, *feature).is_some(),
             Link::Raw { dev } => dev.probe(),
             Link::Ble { dev } => dev.connected(),
         }

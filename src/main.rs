@@ -41,6 +41,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Config;
+use crate::hidpp::ReadingSource;
 use crate::popup::Line;
 use crate::profile::Profile;
 
@@ -54,6 +55,7 @@ struct Status {
     /// 联系不上，但承载它的接收器还在机器上 —— 多半是休眠或关机。
     /// 显示为「未连接」而不是把设备删掉：删了的话鼠标每次睡深一点都要重新出现一次
     offline: bool,
+    source: ReadingSource,
 }
 
 /// 一次低电量提醒。是「事件」不是「状态」—— 一轮轮询最多产生一次
@@ -129,13 +131,21 @@ fn smooth(shown: Option<u8>, fresh: u8, voltage: bool) -> u8 {
     }
 }
 
-/// 电量与充电状态取自同一台设备。
+/// 电量与充电状态必须取自同一台设备，避免另一台充电把低电红环染蓝。
 fn ring_status(list: &[Status]) -> (Option<u8>, bool) {
     list.iter()
         .filter(|s| !s.offline && s.percent.is_some())
         .min_by_key(|s| (s.percent, s.charging))
         .map(|s| (s.percent, s.charging))
         .unwrap_or((None, false))
+}
+
+fn source_note(source: ReadingSource) -> &'static str {
+    match source {
+        ReadingSource::Live => "",
+        ReadingSource::SystemCache => "（系统缓存）",
+        ReadingSource::Previous => "（上次读数）",
+    }
 }
 
 /// 取走并处理本线程消息队列里的所有消息。
@@ -201,7 +211,13 @@ fn tip_line(s: &Status, name: &str) -> String {
         return format!("{}（未连接）", name);
     }
     match s.percent {
-        Some(p) => format!("{} {}%{}", name, p, if s.charging { " 充电" } else { "" }),
+        Some(p) => format!(
+            "{} {}%{}{}",
+            name,
+            p,
+            if s.charging { " 充电" } else { "" },
+            source_note(s.source)
+        ),
         None if s.charging => format!("{} 充电中（电量未知）", name),
         None => format!("{} --", name),
     }
@@ -223,10 +239,11 @@ fn popup_lines(list: &[Status]) -> Vec<Line> {
             } else {
                 match s.percent {
                     Some(p) => format!(
-                        "{}  {}%{}",
+                        "{}  {}%{}{}",
                         s.name,
                         p,
-                        if s.charging { "  充电中" } else { "" }
+                        if s.charging { "  充电中" } else { "" },
+                        source_note(s.source)
                     ),
                     None if s.charging => format!("{}  充电中（电量未知）", s.name),
                     None => format!("{}  --", s.name),
@@ -469,6 +486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             percent: Option<u8>,
             raw_percent: Option<u8>,
             last_read: Option<Instant>,
+            source: ReadingSource,
             charging: bool,
             /// 两档提醒各自的弹药
             arm_critical: Arm,
@@ -637,6 +655,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 percent: None,
                 raw_percent: None,
                 last_read: None,
+                source: ReadingSource::Live,
                 charging: false,
                 arm_critical: Arm::Armed,
                 arm_warn: Arm::Armed,
@@ -672,6 +691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             percent: None,
                             raw_percent: None,
                             last_read: None,
+                            source: ReadingSource::Live,
                             charging: false,
                             arm_critical: Arm::Armed,
                             arm_warn: Arm::Armed,
@@ -710,7 +730,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 设备就不必经历「移出列表 — 重新发现」这一趟。
                     if let Some(i) = watched.iter().position(|w| w.dev.id == d.id) {
                         let w = &mut watched[i];
-                        if w.offline || reload_devices {
+                        if w.offline || w.source == ReadingSource::Previous || reload_devices {
                             info!("[scan] {} 重新连上了，换用新句柄", d.name);
                             w.dev = d;
                             w.offline = false;
@@ -731,6 +751,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         percent: None,
                         raw_percent: None,
                         last_read: None,
+                        source: ReadingSource::Live,
                         charging: false,
                         arm_critical: Arm::Armed,
                         arm_warn: Arm::Armed,
@@ -760,6 +781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .percent
                             .map(|p| smooth(w.percent, p, w.dev.uses_voltage()));
                         w.last_read = Some(Instant::now());
+                        w.source = b.source;
                         w.charging = b.charging;
                         if let Some(a) = check_alert(w, fresh) {
                             alerts.push(a);
@@ -767,6 +789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // 读失败：保留上一次的值。绝不用 0% 表示「读不到」（PRD §2.3）
                     None => {
+                        w.source = ReadingSource::Previous;
                         // 「读不到电量」不等于「设备没了」，先问一句再决定算不算数。
                         // 设备浅睡时（实测 GPW 静止一段时间后就是这样）探测照样答应，
                         // 只是不回答电量请求。这种情况让它留在列表里、保留上次读数 ——
@@ -855,6 +878,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     percent: if w.offline { None } else { w.percent },
                     charging: w.charging && !w.offline,
                     offline: w.offline,
+                    source: w.source,
                 })
                 .collect::<Vec<_>>();
             if tx.send(snap).is_err() {
@@ -1397,10 +1421,14 @@ mod tests {
     use super::{tooltip_of, Status, SUBMIT_URL, TIP_MAX_CHARS};
 
     #[test]
-    fn 充电未知不会显示满电() {
-        let mut status = s("耳机", "耳机", None);
-        status.charging = true;
-        assert_eq!(tooltip_of(&[status]), "耳机 充电中（电量未知）");
+    fn 直接百分比和端点立即更新() {
+        assert_eq!(super::smooth(Some(21), 20, false), 20);
+        assert_eq!(super::smooth(Some(99), 100, false), 100);
+        assert_eq!(super::smooth(Some(99), 100, true), 100);
+        assert_eq!(super::smooth(Some(1), 0, true), 0);
+        assert_eq!(super::smooth(Some(51), 50, true), 51);
+        assert_eq!(super::smooth(Some(21), 20, true), 20);
+        assert_eq!(super::smooth(Some(11), 10, true), 10);
     }
 
     #[test]
@@ -1419,14 +1447,15 @@ mod tests {
     }
 
     #[test]
-    fn 直接百分比和端点立即更新() {
-        assert_eq!(super::smooth(Some(21), 20, false), 20);
-        assert_eq!(super::smooth(Some(99), 100, false), 100);
-        assert_eq!(super::smooth(Some(99), 100, true), 100);
-        assert_eq!(super::smooth(Some(1), 0, true), 0);
-        assert_eq!(super::smooth(Some(51), 50, true), 51);
-        assert_eq!(super::smooth(Some(21), 20, true), 20);
-        assert_eq!(super::smooth(Some(11), 10, true), 10);
+    fn 充电未知缓存和旧读数在界面上明确区分() {
+        let mut status = s("耳机", "耳机", None);
+        status.charging = true;
+        assert_eq!(tooltip_of(&[status]), "耳机 充电中（电量未知）");
+        let mut status = s("手柄", "手柄", Some(42));
+        status.source = crate::hidpp::ReadingSource::SystemCache;
+        assert_eq!(super::tip_line(&status, "手柄"), "手柄 42%（系统缓存）");
+        status.source = crate::hidpp::ReadingSource::Previous;
+        assert_eq!(super::tip_line(&status, "手柄"), "手柄 42%（上次读数）");
     }
 
     /// 收集页的链接是写死在程序里的，改的时候容易手滑：
@@ -1452,6 +1481,7 @@ mod tests {
             percent: pct,
             charging: false,
             offline: false,
+            source: crate::hidpp::ReadingSource::Live,
         }
     }
 
@@ -1463,6 +1493,7 @@ mod tests {
             percent: None,
             charging: false,
             offline: true,
+            source: crate::hidpp::ReadingSource::Live,
         }
     }
 

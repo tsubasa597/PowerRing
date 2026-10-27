@@ -367,11 +367,13 @@ mod tests {
             percent: Some(88),
             mv: 4050,
             charging: false,
+            source: crate::hidpp::ReadingSource::Live,
         };
         let zero = Battery {
             percent: Some(0),
             mv: 0,
             charging: false,
+            source: crate::hidpp::ReadingSource::Live,
         };
         assert!(plausible(&good, BatteryKind::Voltage));
         assert!(!plausible(&zero, BatteryKind::Voltage));
@@ -380,11 +382,13 @@ mod tests {
             percent: Some(1),
             mv: 2500,
             charging: false,
+            source: crate::hidpp::ReadingSource::Live,
         };
         let high = Battery {
             percent: Some(100),
             mv: 5000,
             charging: false,
+            source: crate::hidpp::ReadingSource::Live,
         };
         assert!(plausible(&low, BatteryKind::Voltage));
         assert!(plausible(&high, BatteryKind::Voltage));

@@ -8,6 +8,9 @@
 #![allow(dead_code)]
 
 use hidapi::HidDevice;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 pub const F_BATTERY_VOLTAGE: u16 = 0x1001; // 电压式电量（GPW 走这条）
 pub const F_UNIFIED_BATTERY: u16 = 0x1004; // 统一电量（GPW 不支持）
@@ -68,17 +71,64 @@ pub struct Battery {
     pub mv: u16,
     /// 是否正在充电
     pub charging: bool,
+    pub source: ReadingSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingSource {
+    Live,
+    SystemCache,
+    Previous,
 }
 
 pub struct Hidpp {
     dev: HidDevice,
+    features: RefCell<HashMap<(u8, u16), u8>>,
+    percentage_capable: RefCell<HashMap<(u8, u8), bool>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    Match,
+    Error,
+    Unrelated,
+}
+
+fn classify_reply(req: &[u8], reply: &[u8]) -> Reply {
+    if req.len() < 4 || reply.len() < 4 || reply[1] != req[1] {
+        return Reply::Unrelated;
+    }
+    let size = match reply[0] {
+        0x10 => 7,
+        0x11 => 20,
+        _ => return Reply::Unrelated,
+    };
+    if reply.len() < size {
+        return Reply::Unrelated;
+    }
+    if matches!(reply[0], 0x10 | 0x11)
+        && matches!(reply[2], 0x8F | 0xFF)
+        && reply.len() >= 6
+        && reply[3..5] == req[2..4]
+    {
+        return Reply::Error;
+    }
+    if matches!(reply[0], 0x10 | 0x11) && reply[2..4] == req[2..4] {
+        Reply::Match
+    } else {
+        Reply::Unrelated
+    }
 }
 
 impl Hidpp {
     pub fn new(dev: HidDevice) -> Self {
         // 非阻塞读：收不到就超时返回，不卡死主线程
         let _ = dev.set_blocking_mode(false);
-        Self { dev }
+        Self {
+            dev,
+            features: RefCell::new(HashMap::new()),
+            percentage_capable: RefCell::new(HashMap::new()),
+        }
     }
 
     /// 发一条 HID++ 报文并等待应答。
@@ -91,7 +141,11 @@ impl Hidpp {
 
         // 清空遗留应答，避免读到上一轮的回复
         let mut tmp = [0u8; 64];
-        while let Ok(k) = self.dev.read_timeout(&mut tmp, 5) {
+        let drain_until = Instant::now() + Duration::from_millis(20);
+        while Instant::now() < drain_until {
+            let Ok(k) = self.dev.read_timeout(&mut tmp, 5) else {
+                break;
+            };
             if k == 0 {
                 break;
             }
@@ -100,10 +154,23 @@ impl Hidpp {
         if self.dev.write(&out).is_err() {
             return None;
         }
-        match self.dev.read_timeout(&mut tmp, wait_ms) {
-            Ok(k) if k > 0 => Some(tmp[..k].to_vec()),
-            _ => None,
+        let deadline = Instant::now() + Duration::from_millis(wait_ms as u64);
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let k = self
+                .dev
+                .read_timeout(&mut tmp, remaining.as_millis().max(1) as i32)
+                .ok()?;
+            if k == 0 {
+                return None;
+            }
+            match classify_reply(req, &tmp[..k]) {
+                Reply::Match => return Some(tmp[..k].to_vec()),
+                Reply::Error => return None,
+                Reply::Unrelated => continue,
+            }
         }
+        None
     }
 
     /// 这个 USB 接口在系统上还在不在。
@@ -128,6 +195,18 @@ impl Hidpp {
     /// 查询某个 feature 在设备上的 index；返回 None 表示不支持。
     /// 注意：不能用 ping 判断 slot 是否有设备（M0 实测不可靠），改用 feature 查询。
     pub fn feature_index(&self, dev_idx: u8, feature: u16) -> Option<u8> {
+        if let Some(index) = self.features.borrow().get(&(dev_idx, feature)) {
+            return Some(*index);
+        }
+        self.query_feature_index(dev_idx, feature)
+    }
+
+    /// 在线探测必须真的发请求，不能用 feature 缓存当作设备仍在线的证据。
+    pub fn query_feature_index(&self, dev_idx: u8, feature: u16) -> Option<u8> {
+        self.features.borrow_mut().remove(&(dev_idx, feature));
+        self.percentage_capable
+            .borrow_mut()
+            .retain(|(idx, _), _| *idx != dev_idx);
         let r = self.request(
             &[
                 0x11,
@@ -140,6 +219,7 @@ impl Hidpp {
             300,
         )?;
         if r.len() > 4 && r[0] == 0x11 && r[3] == 0x0D && r[4] != 0 {
+            self.features.borrow_mut().insert((dev_idx, feature), r[4]);
             Some(r[4])
         } else {
             None
@@ -150,7 +230,16 @@ impl Hidpp {
         let sw = 0x0D;
         let mut req = vec![0x11, dev_idx, f_idx, ((func & 0x0F) << 4) | (sw & 0x0F)];
         req.extend_from_slice(params);
-        self.request(&req, 300)
+        let reply = self.request(&req, 300);
+        if reply.is_none() {
+            self.features
+                .borrow_mut()
+                .retain(|(idx, _), _| *idx != dev_idx);
+            self.percentage_capable
+                .borrow_mut()
+                .retain(|(idx, _), _| *idx != dev_idx);
+        }
+        reply
     }
 
     /// 把 HID 报文里的定长字节串转成文本。
@@ -197,24 +286,112 @@ impl Hidpp {
             return None;
         }
         let mv = ((r[4] as u16) << 8) | r[5] as u16;
+        if !(2500..=5000).contains(&mv) {
+            return None;
+        }
         Some(Battery {
             percent: Some(mv_to_percent(mv)),
             mv,
             charging: r[6] & 0x80 != 0,
+            source: ReadingSource::Live,
         })
     }
 
-    /// 按声明指定的 feature 读统一电量（0x1004 类）：[4] 直接就是百分比
+    /// 0x1004：function 0 是能力查询，function 1 才是状态；参数 0 为百分比，2 为充电状态。
+    /// 协议字段参考 Linux HID++ 驱动中的 Unified Battery 定义；未复制其源码。
     pub fn battery_percent(&self, dev_idx: u8, feature: u16) -> Option<Battery> {
         let i = self.feature_index(dev_idx, feature)?;
-        let r = self.call(dev_idx, i, 0x00, &[0; 16])?;
-        if r.len() < 6 {
+        let cached = self.percentage_capable.borrow().get(&(dev_idx, i)).copied();
+        let capable = match cached {
+            Some(value) => value,
+            None => {
+                let capabilities = self.call(dev_idx, i, 0x00, &[0; 16])?;
+                let value = capabilities.get(5)? & 0x02 != 0;
+                self.percentage_capable
+                    .borrow_mut()
+                    .insert((dev_idx, i), value);
+                value
+            }
+        };
+        let r = self.call(dev_idx, i, 0x01, &[0; 16])?;
+        Self::parse_percent(&r, capable)
+    }
+
+    fn parse_percent(r: &[u8], capable: bool) -> Option<Battery> {
+        if r.len() < 8 || (capable && r[4] > 100) {
             return None;
         }
         Some(Battery {
-            percent: Some(r[4]),
+            percent: capable.then_some(r[4]),
             mv: 0,
-            charging: r[5] & 0x80 != 0,
+            charging: matches!(r[6], 1..=3),
+            source: ReadingSource::Live,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packet(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0; if bytes[0] == 0x10 { 7 } else { 20 }];
+        out[..bytes.len()].copy_from_slice(bytes);
+        out
+    }
+
+    #[test]
+    fn 只接受当前设备和函数的应答() {
+        let req = [0x11, 2, 7, 0x1D];
+        assert_eq!(
+            classify_reply(&req, &packet(&[0x11, 2, 7, 0x1D, 80])),
+            Reply::Match
+        );
+        for reply in [
+            packet(&[0x11, 1, 7, 0x1D, 80]),
+            packet(&[0x11, 2, 8, 0x1D, 80]),
+            packet(&[0x11, 2, 7, 0x0D, 80]),
+            packet(&[0x11, 2, 7, 0x10, 80]),
+            vec![0x11, 2, 7, 0x1D, 80],
+            vec![0x11, 2],
+        ] {
+            assert_eq!(classify_reply(&req, &reply), Reply::Unrelated);
+        }
+    }
+
+    #[test]
+    fn 协议错误不能作为电量应答() {
+        let req = [0x11, 2, 7, 0x1D];
+        assert_eq!(
+            classify_reply(&req, &packet(&[0x11, 2, 0xFF, 7, 0x1D, 6])),
+            Reply::Error
+        );
+        assert_eq!(
+            classify_reply(&req, &packet(&[0x10, 2, 0x8F, 7, 0x1D, 6])),
+            Reply::Error
+        );
+        assert_eq!(
+            classify_reply(&req, &packet(&[0x11, 2, 0xFF, 8, 0x1D, 6])),
+            Reply::Unrelated
+        );
+    }
+
+    #[test]
+    fn 统一电量状态按正确字段解析() {
+        let mut reply = [0x11, 1, 7, 0x1D, 42, 8, 1, 1];
+        let battery = Hidpp::parse_percent(&reply, true).unwrap();
+        assert_eq!(battery.percent, Some(42));
+        assert!(battery.charging);
+        reply[6] = 0;
+        assert!(!Hidpp::parse_percent(&reply, true).unwrap().charging);
+        reply[4] = 255;
+        assert!(Hidpp::parse_percent(&reply, true).is_none());
+        assert!(Hidpp::parse_percent(&reply[..6], true).is_none());
+    }
+
+    #[test]
+    fn 只有粗档位的设备不能伪装成零电量() {
+        let reply = [0x11, 1, 7, 0x1D, 0, 4, 0, 0];
+        assert_eq!(Hidpp::parse_percent(&reply, false).unwrap().percent, None);
     }
 }
