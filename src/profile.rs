@@ -39,7 +39,7 @@ pub enum Transport {
 }
 
 /// 编译后的声明：十六进制已解析成数值，可直接参与比较
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub name: String,
     /// 托盘悬停文字用的短名。同时挂好几台设备时全名拼起来会很长，
@@ -170,7 +170,7 @@ struct RawIdentify {
 }
 
 /// protocol: raw 的报文规格。字段全部来自声明，代码里不出现任何厂商常量
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawSpec {
     /// 请求报文（首字节是 report id），会补 0 到 reply_len 的长度
     pub request: Vec<u8>,
@@ -300,21 +300,32 @@ pub fn load() -> Vec<Profile> {
         if d.is_dir() {
             any_dir = true;
             info!("[profile] 设备声明目录：{:?}", d);
-            all.extend(load_from(&d));
+            let user = user_devices_dir().as_deref() == Some(d.as_path());
+            all.extend(load_from(&d, user));
         }
     }
     if !any_dir {
         warn!("[profile] 没找到 devices 目录，程序将检测不到任何设备");
         return Vec::new();
     }
-    // 同一个设备可能被两个目录同时声明：内置名单里有的，后来自动发现又写了一份到用户目录。
-    // 以**先加载到的为准**（exe 旁的在前，也就是内置优先），后到的整份跳过 ——
-    // 留两份会让同一台设备在面板里出现两行。
+    // 手动声明 > 同步声明 > 内置声明 > 自动发现；同优先级按目录及文件名顺序。
+    all.sort_by_key(|(_, priority)| *priority);
+    merge_profiles(all.into_iter().map(|(p, _)| p))
+}
+
+fn merge_profiles(all: impl IntoIterator<Item = Profile>) -> Vec<Profile> {
     let mut out: Vec<Profile> = Vec::new();
     for p in all {
-        let dup = out
-            .iter()
-            .any(|q| q.vid == p.vid && q.pid == p.pid && q.protocol == p.protocol);
+        let dup = out.iter().any(|q| {
+            q.vid == p.vid
+                && q.pid == p.pid
+                && q.protocol == p.protocol
+                && q.transport == p.transport
+                && q.usage_page == p.usage_page
+                && q.usage == p.usage
+                && q.battery_feature == p.battery_feature
+                && q.identify_contains == p.identify_contains
+        });
         if dup {
             info!(
                 "[profile] {} 已在前面的目录里声明过，跳过重复的一份",
@@ -336,15 +347,18 @@ pub fn parse_bundle(text: &str) -> Result<Vec<Profile>, String> {
     #[derive(Deserialize)]
     struct Bundle {
         #[serde(default)]
-        devices: Vec<Raw>,
+        devices: Vec<serde_yml::Value>,
     }
     let b: Bundle = serde_yml::from_str(text).map_err(|e| format!("清单不是合法 YAML：{e}"))?;
     if b.devices.is_empty() {
         return Err("清单里一份声明都没有".to_string());
     }
     let mut out = Vec::new();
-    for raw in b.devices {
-        match raw.compile() {
+    for value in b.devices {
+        match serde_yml::from_value::<Raw>(value)
+            .map_err(|e| e.to_string())
+            .and_then(Raw::compile)
+        {
             Ok(p) => out.push(p),
             Err(e) => warn!("[profile] 远程清单里有一份声明不对，跳过：{e}"),
         }
@@ -392,10 +406,35 @@ pub fn save_discovered(list: &[Profile]) -> usize {
 /// feature 后缀不能省：同一个接收器上可能挂着用不同 feature 的两台设备，
 /// 那就得有两份声明。不带后缀的话第二份会被「已存在」挡掉，等于白认一台。
 fn slug(p: &Profile) -> String {
-    match p.battery_feature {
+    let mut key = match p.battery_feature {
         Some(f) => format!("{:04X}-{:04X}-{f:04X}", p.vid, p.pid),
         None => format!("{:04X}-{:04X}", p.vid, p.pid),
+    };
+    let protocol = match p.protocol {
+        Protocol::Hidpp20 => "hidpp",
+        Protocol::Ble => "ble",
+        Protocol::Raw => "raw",
+    };
+    let transport = match p.transport {
+        Transport::Receiver => "receiver",
+        Transport::Direct => "direct",
+    };
+    key.push_str(&format!("-{protocol}-{transport}"));
+    if let Some(page) = p.usage_page {
+        key.push_str(&format!("-p{page:04X}"));
     }
+    if let Some(usage) = p.usage {
+        key.push_str(&format!("-u{usage:04X}"));
+    }
+    if let Some(contains) = &p.identify_contains {
+        // 不同设备可以共用同一个接收器、电量 feature 和接口。
+        // 把识别条件编码进文件名，避免后写的一份覆盖先写的。
+        key.push('-');
+        for byte in contains.bytes() {
+            key.push_str(&format!("{byte:02X}"));
+        }
+    }
+    key
 }
 
 /// 远程同步来的声明落盘：`%APPDATA%\PowerRing\devices\synced-*.yaml`。
@@ -407,14 +446,13 @@ fn slug(p: &Profile) -> String {
 ///   本地还留着就是继续用错的
 ///
 /// 返回（新增的份数，更新的份数）
-pub fn save_synced(list: &[Profile]) -> (usize, usize) {
-    let Some(dir) = user_devices_dir() else {
-        return (0, 0);
-    };
-    if let Err(e) = fs::create_dir_all(&dir) {
-        warn!("[profile] 建不了用户声明目录 {:?}：{e}", dir);
-        return (0, 0);
-    }
+pub fn save_synced(list: &[Profile]) -> Result<(usize, usize), String> {
+    let dir = user_devices_dir().ok_or("找不到用户设备声明目录")?;
+    save_synced_to(list, &dir)
+}
+
+fn save_synced_to(list: &[Profile], dir: &Path) -> Result<(usize, usize), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("建不了用户声明目录：{e}"))?;
     let mut added = 0;
     let mut updated = 0;
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -425,29 +463,35 @@ pub fn save_synced(list: &[Profile]) -> (usize, usize) {
         let text = to_yaml(p, NOTE_SYNCED);
         // 内容没变就不写：省一次磁盘写入，也让文件时间戳老实待着 ——
         // 用户可能正盯着这个目录排查问题，每次同步都跳一遍时间戳会误导他
-        match fs::read_to_string(&path) {
+        let existed = match fs::read_to_string(&path) {
             Ok(old) if old == text => continue,
-            Ok(_) => updated += 1,
-            Err(_) => added += 1,
+            Ok(_) => true,
+            Err(_) => false,
+        };
+        fs::write(&path, text).map_err(|e| format!("写不进声明 {file}：{e}"))?;
+        if existed {
+            updated += 1;
+        } else {
+            added += 1;
         }
-        match fs::write(&path, text) {
-            Ok(()) => info!("[profile] 同步声明 {file}"),
-            Err(e) => warn!("[profile] 写不进 {:?}：{e}", path),
-        }
+        info!("[profile] 同步声明 {file}");
     }
     // 清理：本次清单里没有的 synced-* 全部删掉
-    if let Ok(rd) = fs::read_dir(&dir) {
+    if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if name.starts_with("synced-") && name.ends_with(".yaml") && !keep.contains(&name) {
                 match fs::remove_file(e.path()) {
-                    Ok(()) => info!("[profile] 远程清单里没有了，删掉旧的 {name}"),
-                    Err(err) => warn!("[profile] 删不掉 {name}：{err}"),
+                    Ok(()) => {
+                        updated += 1;
+                        info!("[profile] 远程清单里没有了，删掉旧的 {name}");
+                    }
+                    Err(err) => return Err(format!("删不掉声明 {name}：{err}")),
                 }
             }
         }
     }
-    (added, updated)
+    Ok((added, updated))
 }
 
 /// 用户目录：%APPDATA%\PowerRing\devices
@@ -501,11 +545,20 @@ fn to_yaml(p: &Profile, note: &str) -> String {
     s.push_str(note);
     s.push('\n');
     s.push_str(&format!("name: {name}\n"));
+    if let Some(short) = &p.short_name {
+        s.push_str(&format!("short: {}\n", yaml_string(short)));
+    }
     s.push_str(&format!("protocol: {protocol}\n"));
     s.push_str(&format!("transport: {transport}\n"));
     s.push_str("match:\n");
     s.push_str(&format!("  vendor_id: \"0x{:04X}\"\n", p.vid));
     s.push_str(&format!("  product_id: \"0x{:04X}\"\n", p.pid));
+    if let Some(page) = p.usage_page {
+        s.push_str(&format!("  usage_page: \"0x{page:04X}\"\n"));
+    }
+    if let Some(usage) = p.usage {
+        s.push_str(&format!("  usage: \"0x{usage:04X}\"\n"));
+    }
     if p.protocol == Protocol::Hidpp20 {
         let slots = p
             .slots
@@ -520,6 +573,35 @@ fn to_yaml(p: &Profile, note: &str) -> String {
         s.push_str(&format!("  feature: \"0x{f:04X}\"\n"));
     }
     s.push_str(&format!("  kind: {kind}\n"));
+    if let Some(raw) = &p.raw {
+        let request = raw
+            .request
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!("  request: \"{request}\"\n"));
+        s.push_str(&format!(
+            "  reply_len: {}\n  state_index: {}\n  value_index: {}\n",
+            raw.reply_len, raw.state_index, raw.value_index
+        ));
+        let states = raw
+            .charging_states
+            .iter()
+            .map(|b| format!("\"0x{b:02X}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("  charging_states: [{states}]\n"));
+        if !raw.table.is_empty() {
+            s.push_str("  table:\n");
+            for (state, rows) in &raw.table {
+                s.push_str(&format!("    \"0x{state:02X}\":\n"));
+                for (hi, percent) in rows {
+                    s.push_str(&format!("      - [{hi}, {percent}]\n"));
+                }
+            }
+        }
+    }
     // 这两个字段的值已经是「带引号的字符串」，别再套一层引号 ——
     // 套两层会让 YAML 解析出一个以引号开头的怪值，而且解析失败是静默跳过的，
     // 用户只会看到这台设备不见了，很难联想到是这里多写了一对引号
@@ -528,9 +610,14 @@ fn to_yaml(p: &Profile, note: &str) -> String {
         yaml_string(&p.protocol_source)
     ));
     s.push_str(&format!("verification: {}\n", yaml_string(&p.verification)));
-    if let Some(nf) = p.name_feature {
+    if p.name_feature.is_some() || p.identify_contains.is_some() {
         s.push_str("identify:\n");
-        s.push_str(&format!("  name_feature: \"0x{nf:04X}\"\n"));
+        if let Some(nf) = p.name_feature {
+            s.push_str(&format!("  name_feature: \"0x{nf:04X}\"\n"));
+        }
+        if let Some(contains) = &p.identify_contains {
+            s.push_str(&format!("  contains: {}\n", yaml_string(contains)));
+        }
     }
     s
 }
@@ -587,14 +674,15 @@ fn candidate_bases() -> Vec<PathBuf> {
     out
 }
 
-fn load_from(dir: &Path) -> Vec<Profile> {
+fn load_from(dir: &Path, user: bool) -> Vec<(Profile, u8)> {
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(dir) else {
         warn!("[profile] 设备声明目录不可用：{:?}", dir);
         return out;
     };
-    for e in rd.flatten() {
-        let p = e.path();
+    let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
         let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
         if ext != "yaml" && ext != "yml" {
             continue;
@@ -608,7 +696,21 @@ fn load_from(dir: &Path) -> Vec<Profile> {
         };
         match serde_yml::from_str::<Raw>(&text) {
             Ok(raw) => match raw.compile() {
-                Ok(prof) => out.push(prof),
+                Ok(prof) => {
+                    let file = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let priority = if user {
+                        if file.starts_with("auto-") {
+                            3
+                        } else if file.starts_with("synced-") {
+                            1
+                        } else {
+                            0
+                        }
+                    } else {
+                        2
+                    };
+                    out.push((prof, priority));
+                }
                 Err(err) => warn!("[profile] 声明有误，跳过 {:?}：{err}", p),
             },
             Err(err) => warn!("[profile] YAML 解析失败，跳过 {:?}：{err}", p),
@@ -630,6 +732,121 @@ mod tests {
         first(
             "devices:\n  - name: \"测试设备\"\n    protocol: \"ble\"\n    match:\n      vendor_id: \"0x045E\"\n      product_id: \"0x0B13\"\n    battery:\n      kind: \"percent\"\n",
         )
+    }
+
+    #[test]
+    fn 所有内置声明保存后重读不丢字段() {
+        for profile in parse_bundle(include_str!("../remote/devices.yaml")).unwrap() {
+            let text = to_yaml(&profile, NOTE_SYNCED);
+            let loaded = serde_yml::from_str::<Raw>(&text)
+                .unwrap()
+                .compile()
+                .unwrap();
+            assert_eq!(loaded, profile, "{} 保存后发生变化", profile.name);
+        }
+    }
+
+    #[test]
+    fn 识别条件和特殊字符保存后不变() {
+        let mut p = ble();
+        p.name = "设备 \"A\" \\ 测试".into();
+        p.short_name = Some("短名".into());
+        p.name_feature = Some(5);
+        p.identify_contains = Some("TEST \"A\"".into());
+        let loaded = serde_yml::from_str::<Raw>(&to_yaml(&p, ""))
+            .unwrap()
+            .compile()
+            .unwrap();
+        assert_eq!(loaded, p);
+    }
+
+    #[test]
+    fn 同接收器不同电量feature和识别条件不会互相去重() {
+        let mut a = ble();
+        a.protocol = Protocol::Hidpp20;
+        a.battery_feature = Some(0x1001);
+        let mut b = a.clone();
+        b.battery_feature = Some(0x1004);
+        let mut c = a.clone();
+        c.identify_contains = Some("keyboard".into());
+        assert_ne!(slug(&a), slug(&b));
+        assert_ne!(slug(&a), slug(&c));
+        assert_eq!(merge_profiles([a.clone(), b, c, a]).len(), 3);
+    }
+
+    fn temp_dir() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("powerring-profile-test-{}-{n}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn 手动同步内置自动发现按顺序覆盖() {
+        let dir = temp_dir();
+        let builtin = ble();
+        for (file, name) in [
+            ("auto-test.yaml", "自动"),
+            ("synced-test.yaml", "同步"),
+            ("my-test.yaml", "手动"),
+        ] {
+            let mut p = builtin.clone();
+            p.name = name.into();
+            fs::write(dir.join(file), to_yaml(&p, "")).unwrap();
+        }
+        let mut all = vec![(builtin.clone(), 2)];
+        all.extend(load_from(&dir, true));
+        all.sort_by_key(|(_, priority)| *priority);
+        assert_eq!(
+            merge_profiles(all.clone().into_iter().map(|(p, _)| p))[0].name,
+            "手动"
+        );
+        all.retain(|(_, priority)| *priority != 0);
+        assert_eq!(
+            merge_profiles(all.into_iter().map(|(p, _)| p))[0].name,
+            "同步"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 同步落盘能重新加载且删除也计入变化() {
+        let dir = temp_dir();
+        let profiles = parse_bundle(include_str!("../remote/devices.yaml")).unwrap();
+        assert_eq!(
+            save_synced_to(&profiles, &dir).unwrap(),
+            (profiles.len(), 0)
+        );
+        let loaded = load_from(&dir, true);
+        assert_eq!(loaded.len(), profiles.len());
+        for p in &profiles {
+            assert!(loaded.iter().any(|(q, _)| q == p));
+        }
+        assert_eq!(save_synced_to(&profiles, &dir).unwrap(), (0, 0));
+        assert_eq!(
+            save_synced_to(&profiles[..1], &dir).unwrap(),
+            (0, profiles.len() - 1)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 同步写入失败不能返回成功() {
+        let dir = temp_dir();
+        let p = ble();
+        fs::create_dir(dir.join(format!("synced-{}.yaml", slug(&p)))).unwrap();
+        assert!(save_synced_to(&[p], &dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 清单中缺字段的一份不拖垮其它声明() {
+        let text = "devices:\n  - name: broken\n  - name: good\n    protocol: ble\n    match:\n      vendor_id: '045E'\n      product_id: '0B13'\n    battery:\n      kind: percent\n";
+        let profiles = parse_bundle(text).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "good");
     }
 
     /// 这条测的不是代码，是**生成脚本和解析端对不对得上**：
@@ -693,9 +910,9 @@ mod tests {
         p.vid = 0x046D;
         p.pid = 0xC539;
         p.battery_feature = Some(0x1001);
-        assert_eq!(slug(&p), "046D-C539-1001");
-        // 没有 feature 的设备（比如蓝牙自报百分比的）不能多个尾巴
+        assert_eq!(slug(&p), "046D-C539-1001-ble-direct");
+        // 没有 feature 的设备（比如蓝牙自报百分比的）省略 feature 字段
         p.battery_feature = None;
-        assert_eq!(slug(&p), "046D-C539");
+        assert_eq!(slug(&p), "046D-C539-ble-direct");
     }
 }

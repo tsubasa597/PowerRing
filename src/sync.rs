@@ -101,7 +101,7 @@ fn sources(custom: Option<&str>) -> Vec<String> {
 fn apply(body: &str, source: &str) -> Result<Outcome, String> {
     let list = crate::profile::parse_bundle(body)?;
     let total = list.len();
-    let (added, updated) = crate::profile::save_synced(&list);
+    let (added, updated) = crate::profile::save_synced(&list)?;
     Ok(Outcome {
         total,
         added,

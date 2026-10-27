@@ -645,6 +645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
         let mut last_scan = Instant::now();
+        let mut reload_devices = false;
         // 刚有设备消失时置为中短期的截止时刻，在这之前都当它「随时会回来」
         let mut return_until: Option<Instant> = None;
 
@@ -692,19 +693,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 刚有设备消失时这个周期会临时压到 RETURN_WAIT —— 用户实测
                 // 「重开 ♪ 出现」要 50 秒，就是被 60 秒的周期卡住的
                 last_scan = Instant::now();
-                for d in device::scan(&api, &profiles) {
-                    // 按名字找，而不是「在不在列表里」：未连接的设备也在列表里，
+                let rescanned = device::scan(&api, &profiles);
+                if reload_devices {
+                    watched.retain(|w| {
+                        profiles.contains(&w.dev.profile)
+                            || rescanned.iter().any(|d| d.name == w.dev.name)
+                    });
+                }
+                for d in rescanned {
+                    // 按实际链路找：同型号设备可以同名，不能把两台当成一台。
+                    // 未连接的设备也在列表里，
                     // 但它手里那个句柄可能是拔掉之前那一个 —— 接收器拔了又插回来时，
                     // 旧句柄指向的是一个已经不存在的实例，永远不会再答话，
                     // 于是它会永远挂着「未连接」。趁它现在答话把句柄换成新的，
                     // 设备就不必经历「移出列表 — 重新发现」这一趟。
                     if let Some(i) = watched.iter().position(|w| w.dev.name == d.name) {
                         let w = &mut watched[i];
-                        if w.offline {
+                        if w.offline || reload_devices {
                             info!("[scan] {} 重新连上了，换用新句柄", d.name);
                             w.dev = d;
                             w.offline = false;
                             w.misses = 0;
+                            if reload_devices {
+                                w.percent = None;
+                                w.raw_percent = None;
+                                w.last_read = None;
+                            }
                         }
                         continue;
                     }
@@ -724,6 +738,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         detached: false,
                     });
                 }
+                reload_devices = false;
             }
 
             let mut alerts: Vec<Alert> = Vec::new();
@@ -914,6 +929,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     profiles.len()
                 );
                 profiles = fresh;
+                reload_devices = true;
                 // 把重扫计时拨到期，下一轮立刻按新声明扫一遍，别让人等一分钟
                 last_scan = Instant::now() - RESCAN_EVERY;
             }

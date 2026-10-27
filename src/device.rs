@@ -33,6 +33,7 @@ enum Link {
 }
 
 pub struct Device {
+    pub profile: Profile,
     /// 显示名：优先用设备自报的名字，取不到才用声明名
     pub name: String,
     /// 托盘悬停用的短名。来自声明的 short，没有就用声明名
@@ -231,6 +232,7 @@ fn scan_ble(prof: &Profile, seen: &mut HashSet<String>, out: &mut Vec<Device>) {
             continue;
         }
         out.push(Device {
+            profile: prof.clone(),
             // 用系统在蓝牙里认到的名字，比声明里的名字更贴用户看到的那台设备
             name: if node.name.is_empty() {
                 prof.name.clone()
@@ -263,6 +265,7 @@ fn scan_raw(
         return;
     }
     out.push(Device {
+        profile: prof.clone(),
         short: prof.short_name.clone().unwrap_or_else(|| prof.name.clone()),
         name: prof.name.clone(),
         link: Link::Raw { dev: dev.clone() },
@@ -314,6 +317,7 @@ fn scan_hidpp(
             .unwrap_or_else(|| prof.name.clone());
 
         out.push(Device {
+            profile: prof.clone(),
             short: prof.short_name.clone().unwrap_or_else(|| name.clone()),
             name,
             link: Link::Hidpp {
